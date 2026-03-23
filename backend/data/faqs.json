@@ -1,0 +1,77 @@
+[
+  {
+    "question": "What is your return policy?",
+    "answer": "We offer a 30-day return policy for all unused items in their original packaging. Simply initiate a return through your account or contact support. Refunds are processed within 5-7 business days after we receive the item.",
+    "category": "returns"
+  },
+  {
+    "question": "How long does shipping take?",
+    "answer": "Standard shipping takes 5-7 business days. Express shipping takes 2-3 business days. Overnight shipping is available for an additional fee. All orders over $50 qualify for free standard shipping.",
+    "category": "shipping"
+  },
+  {
+    "question": "How can I track my order?",
+    "answer": "You can track your order by logging into your account and viewing your order history. You'll also receive a tracking email once your order ships. Alternatively, provide your order ID and we can look it up for you.",
+    "category": "orders"
+  },
+  {
+    "question": "What payment methods do you accept?",
+    "answer": "We accept Visa, MasterCard, American Express, Discover, PayPal, Apple Pay, and Google Pay. All payments are securely processed with 256-bit SSL encryption.",
+    "category": "payments"
+  },
+  {
+    "question": "How do I cancel my order?",
+    "answer": "You can cancel your order within 1 hour of placing it by going to your order history and clicking 'Cancel Order'. After 1 hour, the order may have already been processed. Contact support for assistance with cancellations after this window.",
+    "category": "orders"
+  },
+  {
+    "question": "Do you offer international shipping?",
+    "answer": "Yes, we ship to over 50 countries worldwide. International shipping typically takes 10-15 business days. Customs duties and taxes may apply and are the responsibility of the recipient.",
+    "category": "shipping"
+  },
+  {
+    "question": "What is your warranty policy?",
+    "answer": "All products come with a 1-year manufacturer warranty covering defects in materials and workmanship. Extended warranty options are available at checkout for an additional 1-2 years of coverage.",
+    "category": "warranty"
+  },
+  {
+    "question": "How do I contact customer support?",
+    "answer": "You can reach us via this chat, email at support@example.com, or phone at 1-800-555-0123 (Mon-Fri 9AM-6PM EST). For urgent issues, phone support provides the fastest response.",
+    "category": "contact"
+  },
+  {
+    "question": "Can I change my shipping address after ordering?",
+    "answer": "Address changes can be made within 1 hour of placing your order. Go to your order history and click 'Edit Address'. After this window, please contact support immediately and we'll do our best to update it before shipment.",
+    "category": "shipping"
+  },
+  {
+    "question": "Do you offer gift wrapping?",
+    "answer": "Yes! We offer gift wrapping for $4.99 per item. You can select this option during checkout. We also offer personalized gift messages at no additional cost.",
+    "category": "general"
+  },
+  {
+    "question": "What if my item arrives damaged?",
+    "answer": "If your item arrives damaged, please contact us within 48 hours with photos of the damage. We'll arrange a free replacement or full refund. Keep the original packaging for the return shipping.",
+    "category": "returns"
+  },
+  {
+    "question": "Do you have a loyalty program?",
+    "answer": "Yes! Our Rewards Club gives you 1 point for every $1 spent. Earn 100 points to get a $10 discount. Members also get early access to sales, free shipping on all orders, and birthday rewards.",
+    "category": "general"
+  },
+  {
+    "question": "How do I reset my password?",
+    "answer": "Click 'Forgot Password' on the login page and enter your email. You'll receive a password reset link within minutes. The link expires after 24 hours for security. If you don't receive the email, check your spam folder.",
+    "category": "account"
+  },
+  {
+    "question": "Can I exchange an item instead of returning it?",
+    "answer": "Absolutely! Exchanges are free within 30 days. Start an exchange from your order history, select the item and desired replacement. If the new item costs more, you'll pay the difference; if less, we'll refund the remainder.",
+    "category": "returns"
+  },
+  {
+    "question": "What are your business hours?",
+    "answer": "Our online store is open 24/7. Customer support is available Monday-Friday 9AM-6PM EST, and Saturday 10AM-4PM EST. During holidays, hours may vary - check our website for updates.",
+    "category": "contact"
+  }
+]
