@@ -55,9 +55,9 @@ class Settings(BaseSettings):
         if self.llm_model:
             return self.llm_model
         defaults = {
-            LLMProvider.GEMINI: "gemini-2.0-flash",
+            LLMProvider.GEMINI: "gemini-1.5-flash",
             LLMProvider.OPENAI: "gpt-4o-mini",
-            LLMProvider.ANTHROPIC: "claude-sonnet-4-20250514",
+            LLMProvider.ANTHROPIC: "claude-3-5-sonnet-20241022",
         }
         return defaults[self.llm_provider]
 

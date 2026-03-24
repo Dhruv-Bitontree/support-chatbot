@@ -10,27 +10,40 @@ from app.services.chat.orchestrator import ChatOrchestrator
 
 class TestIntentClassification:
     def test_greeting(self):
-        assert classify_intent("Hello!") == Intent.GREETING
-        assert classify_intent("Hi there") == Intent.GREETING
-        assert classify_intent("Good morning") == Intent.GREETING
+        intent, _, _ = classify_intent("Hello!")
+        assert intent == Intent.GREETING
+        intent, _, _ = classify_intent("Hi there")
+        assert intent == Intent.GREETING
+        intent, _, _ = classify_intent("Good morning")
+        assert intent == Intent.GREETING
 
     def test_order_tracking(self):
-        assert classify_intent("Where is my order?") == Intent.ORDER_TRACKING
-        assert classify_intent("Track ORD-1001") == Intent.ORDER_TRACKING
-        assert classify_intent("What's my delivery status?") == Intent.ORDER_TRACKING
+        intent, _, _ = classify_intent("Where is my order?")
+        assert intent == Intent.ORDER_TRACKING
+        intent, _, _ = classify_intent("Track ORD-1001")
+        assert intent == Intent.ORDER_TRACKING
+        intent, _, _ = classify_intent("What's my delivery status?")
+        assert intent == Intent.ORDER_TRACKING
 
     def test_complaint(self):
-        assert classify_intent("I'm very unhappy with your service") == Intent.COMPLAINT
-        assert classify_intent("I want a refund") == Intent.COMPLAINT
-        assert classify_intent("This product is broken") == Intent.COMPLAINT
+        intent, _, _ = classify_intent("I'm very unhappy with your service")
+        assert intent == Intent.COMPLAINT
+        intent, _, _ = classify_intent("This is terrible and I'm very disappointed")
+        assert intent == Intent.COMPLAINT
+        intent, _, _ = classify_intent("This product is broken and I'm frustrated")
+        assert intent == Intent.COMPLAINT
 
     def test_faq(self):
-        assert classify_intent("What is your return policy?") == Intent.FAQ
-        assert classify_intent("How do I contact support?") == Intent.FAQ
-        assert classify_intent("What are your shipping options?") == Intent.FAQ
+        intent, _, _ = classify_intent("What is your return policy?")
+        assert intent == Intent.FAQ
+        intent, _, _ = classify_intent("How do I contact support?")
+        assert intent == Intent.FAQ
+        intent, _, _ = classify_intent("What are your shipping options?")
+        assert intent == Intent.FAQ
 
     def test_general(self):
-        assert classify_intent("Tell me a joke") == Intent.GENERAL
+        intent, _, _ = classify_intent("Tell me a joke")
+        assert intent == Intent.GENERAL
 
 
 @pytest.mark.asyncio
@@ -57,17 +70,45 @@ class TestChatOrchestrator:
         assert "order ID" in response.message or "order id" in response.message.lower()
 
     async def test_complaint_creates_ticket(self, mock_llm, mock_vector_store, db_session):
+        """Test complaint flow with email-first requirement.
+        
+        Updated to reflect new behavior: complaints now offer options first,
+        then collect email before creating ticket.
+        """
         orchestrator = ChatOrchestrator(
             llm=mock_llm, vector_store=mock_vector_store, db=db_session
         )
-        request = ChatRequest(
+        
+        # Step 1: Send complaint - should offer options
+        request1 = ChatRequest(
             message="This is terrible! I want a refund immediately!", channel="test"
         )
-        response = await orchestrator.handle_message(request)
-
-        assert response.intent == Intent.COMPLAINT
-        assert response.metadata is not None
-        assert "ticket_id" in response.metadata
+        response1 = await orchestrator.handle_message(request1)
+        
+        assert response1.intent == Intent.COMPLAINT
+        assert response1.metadata is not None
+        assert "frustration_detected" in response1.metadata
+        # Should NOT have ticket_id yet - needs to go through email collection
+        assert "ticket_id" not in response1.metadata
+        
+        # Step 2: Choose to create ticket
+        request2 = ChatRequest(
+            message="1", session_id=response1.session_id, channel="test"
+        )
+        response2 = await orchestrator.handle_message(request2)
+        
+        # Should ask for email
+        assert "email" in response2.message.lower()
+        
+        # Step 3: Provide email
+        request3 = ChatRequest(
+            message="user@example.com", session_id=response1.session_id, channel="test"
+        )
+        response3 = await orchestrator.handle_message(request3)
+        
+        # NOW should have ticket_id
+        assert response3.metadata is not None
+        assert "ticket_id" in response3.metadata
 
     async def test_session_persistence(self, mock_llm, mock_vector_store, db_session):
         orchestrator = ChatOrchestrator(

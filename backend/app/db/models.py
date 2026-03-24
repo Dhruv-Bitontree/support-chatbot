@@ -65,5 +65,6 @@ class ChatMessage(Base):
     role = Column(String, nullable=False)
     content = Column(Text, nullable=False)
     intent = Column(String, nullable=True)
+    sentiment_score = Column(Float, nullable=True)  # STEP 4: Added for frustration tracking across turns
     created_at = Column(DateTime, default=datetime.utcnow)
     session = relationship("ChatSession", back_populates="messages")

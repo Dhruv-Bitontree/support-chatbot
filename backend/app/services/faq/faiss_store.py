@@ -42,6 +42,14 @@ class FAISSStore(VectorStore):
                     raw = json.load(f)
                 self.entries = [FAQEntry(**e) for e in raw]
                 logger.info(f"Loaded {len(self.entries)} FAQ entries")
+                
+                # STEP 7: Cold-start warning if FAQ store is empty after initialization
+                if len(self.entries) == 0:
+                    logger.warning(
+                        "⚠️  FAQ vector store is EMPTY after initialization! "
+                        "All FAQ queries will return no results and the LLM will redirect "
+                        "to support contacts. Check that data/faqs.json exists and seeding ran."
+                    )
         except Exception as e:
             logger.error(f"FAISS initialization error: {e}")
             raise VectorStoreError(str(e))
@@ -67,8 +75,10 @@ class FAISSStore(VectorStore):
             for score, idx in zip(scores[0], indices[0]):
                 if idx < 0 or idx >= len(self.entries):
                     continue
-                # Convert cosine similarity to 0-1 range
-                normalized_score = float(max(0, min(1, (score + 1) / 2)))
+                # STEP 7 FIX: IndexFlatIP with normalize_embeddings=True already returns
+                # cosine similarity in range [-1, 1]. The (score + 1) / 2 formula was
+                # for unnormalized vectors. Now we just clamp to [0, 1] directly.
+                normalized_score = float(max(0.0, min(1.0, score)))
                 results.append(FAQSearchResult(
                     entry=self.entries[idx],
                     score=normalized_score,
@@ -80,17 +90,35 @@ class FAISSStore(VectorStore):
 
     async def upsert(self, entries: list[FAQEntry]) -> int:
         try:
+            # STEP 7: Deduplication - check existing entry IDs before adding
+            existing_ids = {e.id for e in self.entries if e.id}
+            new_entries = []
+            
             for entry in entries:
                 if not entry.id:
                     entry.id = str(uuid.uuid4())
+                
+                # Skip if this ID already exists (prevents duplicates on restart + reseed)
+                if entry.id in existing_ids:
+                    logger.debug(f"Skipping duplicate FAQ entry: {entry.id}")
+                    continue
+                
+                new_entries.append(entry)
 
-            texts = [f"{e.question} {e.answer}" for e in entries]
+            if not new_entries:
+                logger.info("No new FAQ entries to upsert (all were duplicates)")
+                return 0
+
+            # STEP 7 FIX: Embed questions only, not question+answer.
+            # User queries are question-like, so embedding the answer text
+            # dilutes the semantic match signal.
+            texts = [e.question for e in new_entries]
             embeddings = self._embed(texts)
             self.index.add(embeddings)
-            self.entries.extend(entries)
+            self.entries.extend(new_entries)
             self._persist()
-            logger.info(f"Upserted {len(entries)} FAQ entries")
-            return len(entries)
+            logger.info(f"Upserted {len(new_entries)} FAQ entries")
+            return len(new_entries)
         except Exception as e:
             logger.error(f"FAISS upsert error: {e}")
             raise VectorStoreError(str(e))
@@ -109,7 +137,8 @@ class FAISSStore(VectorStore):
             dim = self.model.get_sentence_embedding_dimension()
             self.index = faiss.IndexFlatIP(dim)
             if remaining:
-                texts = [f"{e.question} {e.answer}" for e in remaining]
+                # STEP 7: Consistent with upsert - embed questions only
+                texts = [e.question for e in remaining]
                 embeddings = self._embed(texts)
                 self.index.add(embeddings)
             self._persist()
