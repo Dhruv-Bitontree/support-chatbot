@@ -2,48 +2,48 @@
 
 import { cn, formatTime } from "@/lib/utils";
 import { ChatMessage as ChatMessageType } from "@/lib/types";
+import DOMPurify from "dompurify";
 
 interface Props {
   message: ChatMessageType;
 }
 
+let purifyHookInitialized = false;
+
 export default function ChatMessage({ message }: Props) {
   const isUser = message.role === "user";
+  const sanitizedContent = sanitizeMessageHtml(formatMarkdown(message.content));
 
   return (
-    <div
-      className={cn("flex w-full mb-4", isUser ? "justify-end" : "justify-start")}
-    >
-      <div className={cn("flex items-end gap-2 max-w-[80%]", isUser && "flex-row-reverse")}>
-        {/* Avatar */}
+    <div className={cn("mb-4 flex w-full", isUser ? "justify-end" : "justify-start")}>
+      <div className={cn("flex max-w-[84%] items-end gap-2", isUser && "flex-row-reverse")}>
         <div
           className={cn(
-            "flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium",
+            "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-sm font-semibold",
             isUser
-              ? "bg-primary-600 text-white"
-              : "bg-gray-200 text-gray-600",
+              ? "bg-primary-600 text-white shadow-sm"
+              : "bg-slate-200 text-slate-700",
           )}
         >
           {isUser ? "U" : "AI"}
         </div>
 
-        {/* Bubble */}
         <div
           className={cn(
-            "rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
+            "rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm",
             isUser
-              ? "bg-primary-600 text-white rounded-br-sm"
-              : "bg-gray-100 text-gray-800 rounded-bl-sm",
+              ? "rounded-br-sm bg-gradient-to-br from-primary-600 to-primary-700 text-white"
+              : "rounded-bl-sm border border-slate-200 bg-white text-slate-800",
           )}
         >
           <div
             className="chat-message"
-            dangerouslySetInnerHTML={{ __html: formatMarkdown(message.content) }}
+            dangerouslySetInnerHTML={{ __html: sanitizedContent }}
           />
           <div
             className={cn(
-              "text-[10px] mt-1",
-              isUser ? "text-primary-200" : "text-gray-400",
+              "mt-1 text-[10px]",
+              isUser ? "text-blue-100" : "text-slate-400",
             )}
           >
             {formatTime(message.timestamp)}
@@ -54,11 +54,31 @@ export default function ChatMessage({ message }: Props) {
   );
 }
 
+function sanitizeMessageHtml(content: string): string {
+  if (!purifyHookInitialized) {
+    DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+      if ("tagName" in node && (node as Element).tagName === "A") {
+        const anchor = node as HTMLAnchorElement;
+        if (anchor.getAttribute("href")) {
+          anchor.setAttribute("target", "_blank");
+          anchor.setAttribute("rel", "noopener noreferrer");
+        }
+      }
+    });
+    purifyHookInitialized = true;
+  }
+
+  return DOMPurify.sanitize(content, {
+    ALLOWED_TAGS: ["b", "i", "em", "strong", "a", "ul", "ol", "li", "p", "br", "code", "pre"],
+    ALLOWED_ATTR: ["href", "target", "rel"],
+  });
+}
+
 function formatMarkdown(text: string): string {
   return text
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.*?)\*/g, "<em>$1</em>")
     .replace(/`(.*?)`/g, "<code>$1</code>")
-    .replace(/\n- /g, "\n• ")
+    .replace(/\n- /g, "\n&bull; ")
     .replace(/\n/g, "<br />");
 }

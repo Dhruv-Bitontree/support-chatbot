@@ -85,9 +85,17 @@ class GeminiProvider(LLMProvider):
 
     async def classify(self, text: str, categories: list[str]) -> str:
         prompt = (
-            f"Classify the following text into exactly one of these categories: {', '.join(categories)}.\n"
+            "You are an intent classifier for an e-commerce support chatbot.\n"
+            f"Valid categories: {', '.join(categories)}.\n\n"
+            "Rules:\n"
+            "- Use order_tracking only for explicit tracking requests (track/check/find status) or when an order ID is provided.\n"
+            "- If the message is angry, threatening, sarcastic, or negative about service (even with order words), use complaint.\n"
+            "- Use faq for policy/how-to/company-process questions.\n"
+            "- Use greeting for short social openers.\n"
+            "- Use general for small talk, vague text, or when uncertain.\n"
+            "- If uncertain between categories, choose general.\n\n"
             f"Text: {text}\n"
-            f"Respond with ONLY the category name, nothing else."
+            "Respond with ONLY one category token."
         )
         messages = [Message(role=MessageRole.USER, content=prompt)]
         result = await self.generate(messages, temperature=0.0)
@@ -95,4 +103,5 @@ class GeminiProvider(LLMProvider):
         for cat in categories:
             if cat.lower() in result:
                 return cat
-        return categories[-1]  # fallback
+        fallback = next((cat for cat in categories if cat.lower() == "general"), categories[0])
+        return fallback

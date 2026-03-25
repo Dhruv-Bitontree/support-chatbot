@@ -9,13 +9,12 @@ export default function QuickReplies({ suggestions, onSelect }: Props) {
   if (!suggestions.length) return null;
 
   return (
-    <div className="flex flex-wrap gap-2 px-4 pb-2">
+    <div className="flex flex-wrap gap-2 border-t border-slate-200 bg-white/80 px-4 pb-2 pt-3">
       {suggestions.map((s) => (
         <button
           key={s}
           onClick={() => onSelect(s)}
-          className="text-xs px-3 py-1.5 rounded-full border border-primary-300 text-primary-600
-                     hover:bg-primary-50 transition-colors whitespace-nowrap"
+          className="whitespace-nowrap rounded-full border border-primary-300 bg-white px-3.5 py-1.5 text-xs font-medium text-primary-700 shadow-sm transition hover:-translate-y-0.5 hover:bg-primary-50 hover:shadow focus:outline-none focus:ring-2 focus:ring-primary-200"
         >
           {s}
         </button>

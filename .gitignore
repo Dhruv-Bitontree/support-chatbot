@@ -6,12 +6,16 @@ dist/
 build/
 .venv/
 venv/
+.pytest_cache/
+pytest-cache-files-*/
+
 
 
 # Node
 node_modules/
 .next/
 out/
+.next-dev/
 
 # Data
 backend/data/faiss_index*
@@ -30,3 +34,8 @@ backend/data/*.db
 # OS
 .DS_Store
 Thumbs.db
+
+# Local dev logs
+frontend/dev_3001*.log
+frontend/dev_3002*.log
+frontend/dev_fix*.log

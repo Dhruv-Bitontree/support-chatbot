@@ -73,11 +73,9 @@ class TestStateMachineBugs:
         )
         response4 = await orchestrator.handle_message(request4)
         
-        # EXPECTED BEHAVIOR: Session should be locked, return closure message
-        assert "ticket has been created" in response4.message.lower()
-        assert "start a new session" in response4.message.lower()
-        # Should NOT process the message through intent classification
-        assert response4.intent == Intent.COMPLAINT  # Intent should indicate locked state
+        # EXPECTED BEHAVIOR (new UX): acknowledge existing ticket without locking session
+        assert "open ticket" in response4.message.lower() or "already have" in response4.message.lower()
+        assert response4.intent == Intent.COMPLAINT
 
     async def test_bug_1_2_infinite_email_collection_loop(
         self, mock_llm, mock_vector_store, db_session
@@ -290,10 +288,11 @@ class TestStateMachineBugs:
         )
         session = result.scalar_one()
         
-        # EXPECTED BEHAVIOR: Metadata should have state=SESSION_LOCKED
+        # EXPECTED BEHAVIOR (new UX): state returns to NORMAL_CHAT after ticket creation
         assert session.metadata_ is not None
         assert "state" in session.metadata_
-        assert session.metadata_["state"] == "SESSION_LOCKED"
+        assert session.metadata_["state"] == "NORMAL_CHAT"
+        assert session.metadata_.get("has_open_ticket") is True
 
     async def test_bug_1_4_duplicate_ticket_not_prevented(
         self, mock_llm, mock_vector_store, db_session
@@ -351,9 +350,7 @@ class TestStateMachineBugs:
         response4 = await orchestrator.handle_message(request4)
         
         # EXPECTED BEHAVIOR: Should acknowledge existing ticket, not create new one
-        # Should return closure message due to session lock
-        assert "ticket has been created" in response4.message.lower()
-        assert "start a new session" in response4.message.lower()
+        assert "open ticket" in response4.message.lower() or "already have" in response4.message.lower()
         
         # Should NOT have a new ticket_id in metadata (or same ticket_id)
         if response4.metadata and "ticket_id" in response4.metadata:

@@ -43,8 +43,19 @@ class TicketService:
             .where(Ticket.session_id == session_id)
             .where(Ticket.status.in_(["open", "escalated"]))
             .order_by(Ticket.created_at.desc())
+            .limit(1)
         )
-        return result.scalar_one_or_none()
+        return result.scalars().first()
+
+    async def get_latest_ticket_for_session(self, session_id: str) -> Ticket | None:
+        """Return the latest ticket for a session regardless of status."""
+        result = await self.db.execute(
+            select(Ticket)
+            .where(Ticket.session_id == session_id)
+            .order_by(Ticket.created_at.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
 
     async def notify_escalation(self, ticket: Ticket) -> None:
         """Notify support team of escalated ticket.
@@ -91,6 +102,22 @@ class TicketService:
         request: ComplaintRequest,
         category: str = "general",
     ) -> TicketResponse:
+        # Session-level idempotency: never create a second ticket in same chat session.
+        if request.session_id:
+            existing_ticket = await self.get_latest_ticket_for_session(request.session_id)
+            if existing_ticket:
+                logger.info(
+                    "Duplicate ticket request blocked for session=%s; returning existing ticket %s",
+                    request.session_id,
+                    existing_ticket.id,
+                )
+                existing_sentiment = SentimentResult(
+                    score=existing_ticket.sentiment_score or 0.0,
+                    label=existing_ticket.sentiment_label or "neutral",
+                    confidence=0.8,
+                )
+                return self._to_response(existing_ticket, existing_sentiment)
+
         sentiment = analyze_sentiment(request.message)
         priority = self._determine_priority(sentiment)
         status = self._determine_status(priority)

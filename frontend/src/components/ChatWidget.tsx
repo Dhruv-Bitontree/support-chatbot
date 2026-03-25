@@ -9,28 +9,27 @@ export default function ChatWidget() {
 
   return (
     <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
-      {/* Chat panel */}
       <div
         className={cn(
-          "transition-all duration-300 ease-in-out origin-bottom-right",
+          "origin-bottom-right transition-all duration-300 ease-in-out",
           isOpen
-            ? "opacity-100 scale-100 pointer-events-auto"
-            : "opacity-0 scale-95 pointer-events-none",
+            ? "pointer-events-auto scale-100 opacity-100"
+            : "pointer-events-none scale-95 opacity-0",
         )}
       >
-        <div className="w-[380px] h-[560px] shadow-2xl rounded-2xl overflow-hidden">
+        <div className="h-[min(78vh,560px)] w-[min(92vw,380px)] overflow-hidden rounded-3xl shadow-2xl">
           <ChatWindow embedded />
         </div>
       </div>
 
-      {/* Floating button */}
       <button
         onClick={() => setIsOpen(!isOpen)}
+        aria-label={isOpen ? "Close chat" : "Open chat"}
         className={cn(
-          "w-14 h-14 rounded-full shadow-lg flex items-center justify-center transition-all duration-200",
+          "flex h-14 w-14 items-center justify-center rounded-full text-white shadow-lg shadow-primary-600/25 transition-all duration-200",
           isOpen
-            ? "bg-gray-600 hover:bg-gray-700 rotate-0"
-            : "bg-primary-600 hover:bg-primary-700",
+            ? "rotate-0 bg-slate-600 hover:bg-slate-700"
+            : "bg-primary-600 hover:-translate-y-0.5 hover:bg-primary-700",
         )}
       >
         {isOpen ? (
@@ -38,7 +37,7 @@ export default function ChatWidget() {
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
             fill="white"
-            className="w-6 h-6"
+            className="h-6 w-6"
           >
             <path
               fillRule="evenodd"
@@ -51,7 +50,7 @@ export default function ChatWidget() {
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
             fill="white"
-            className="w-6 h-6"
+            className="h-6 w-6"
           >
             <path
               fillRule="evenodd"

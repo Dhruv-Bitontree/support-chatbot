@@ -28,16 +28,22 @@ INTENT_PATTERNS: dict[Intent, list[str]] = {
         r"\b(hi|hello|hey|good\s*(morning|afternoon|evening)|howdy|greetings)\b",
     ],
     Intent.ORDER_TRACKING: [
-        r"\b(order|tracking|shipment|delivery|shipped|delivered|package|where\s+is)\b",
-        r"\b(ORD-\w+)\b",
+        r"\b(where\s+is\s+(my\s+)?(order|package|shipment))\b",
+        r"\b(track(ing)?\s+(my\s+)?(order|package|shipment)?)\b",
+        r"\b(order|delivery|shipping)\s+status\b",
+        r"\b(find|check)\s+(my\s+)?(order|package)\b",
+        r"\b(ORD-[A-Z0-9]+)\b",
         r"\b(order\s*(number|id|#|no))\b",
-        r"\b(track|status)\b",
     ],
     # COMPLAINT patterns now focus on ANGER/FRUSTRATION signals, not just keywords
     Intent.COMPLAINT: [
         r"\b(complain|complaint|unhappy|dissatisfied|terrible|awful|worst|angry|furious)\b",
         r"\b(escalate|manager|supervisor|unacceptable|ridiculous|outrageous)\b",
         r"\b(never\s+again|rip\s*off|scam|fraud|disgusting|pathetic)\b",
+        r"\b(legal\s+action|lawsuit|lawyer|sue|court\s+case)\b",
+        r"\b(not\s+placing\s+(any\s+)?order|won'?t\s+order\s+again)\b",
+        r"\b(never\s+getting\s+my\s+order|not\s+on\s+time|late\s+again)\b",
+        r"\b(lost\s+(my\s+)?(order|package)|missing\s+(order|package))\b",
     ],
     # FAQ patterns include polite transactional questions
     Intent.FAQ: [
@@ -54,6 +60,7 @@ FRUSTRATION_SIGNALS = {
     "high": [
         r"\b(furious|livid|outraged|disgusting|pathetic|ridiculous|unbelievable)\b",
         r"\b(never\s+again|worst\s+ever|absolutely\s+unacceptable)\b",
+        r"\b(legal\s+action|lawsuit|lawyer|sue|court\s+case)\b",
         r"[A-Z]{4,}",  # Multiple words in ALL CAPS
         r"!{2,}",      # Multiple exclamation marks
     ],
@@ -61,6 +68,9 @@ FRUSTRATION_SIGNALS = {
         r"\b(frustrated|disappointed|let\s+down|expected\s+better|not\s+okay)\b",
         r"\b(seriously\??|really\??|again\??|still\s+waiting|third\s+time)\b",
         r"\b(nobody\s+is\s+helping|keep\s+telling\s+me|how\s+many\s+times)\b",
+        r"\b(not\s+on\s+time|late\s+delivery|delivery\s+delay(ed)?)\b",
+        r"\b(never\s+getting\s+my\s+order|lost\s+(my\s+)?(order|package))\b",
+        r"\b(not\s+placing\s+(any\s+)?order|won'?t\s+order\s+again)\b",
     ],
     "mild": [
         r"\b(concerned|worried|confused|unclear|unsure)\b",
@@ -72,9 +82,26 @@ FRUSTRATION_SIGNALS = {
 # STEP 3: Detect sarcastic praise combined with negative context
 
 SARCASM_SIGNALS = [
-    r"\b(oh\s+great|oh\s+wonderful|oh\s+fantastic|amazing\s+service)\b",
-    r"\b(love\s+how|sure\s+I'll|I\s+guess|apparently)\b",
-    r"['\"][\w\s]+['\"]",  # Quoted words often indicate sarcasm
+    r"\b(oh\s+great|oh\s+wonderful|oh\s+fantastic|yeah\s+right|thanks\s+for\s+nothing)\b",
+    r"\b(love\s+how|sure\s+i(?:'| )?ll|i\s+guess|apparently)\b",
+]
+
+SARCASM_POSITIVE_WORDS = re.compile(
+    r"\b(good|great|awesome|amazing|fantastic|excellent|wonderful|love)\b",
+    re.IGNORECASE,
+)
+SARCASM_NEGATIVE_CONTEXT = re.compile(
+    r"\b(never|not|late|delay|delayed|again|anymore|worst|bad)\b",
+    re.IGNORECASE,
+)
+SARCASM_LAUGHTER = re.compile(r"\b(haha|hahaha|lol|lmao)\b", re.IGNORECASE)
+
+ORDER_LOOKUP_PATTERNS = [
+    r"\b(where\s+is\s+(my\s+)?(order|package|shipment))\b",
+    r"\b(track(ing)?\s+(my\s+)?(order|package|shipment)?)\b",
+    r"\b(order|delivery|shipping)\s+status\b",
+    r"\b(find|check)\s+(my\s+)?(order|package)\b",
+    r"\b(order\s*(number|id|#|no))\b",
 ]
 
 # ── Polite transactional keywords ────────────────────────────────────────────
@@ -97,6 +124,14 @@ def detect_sarcasm(text: str) -> bool:
     for pattern in SARCASM_SIGNALS:
         if re.search(pattern, text_lower, re.IGNORECASE):
             return True
+
+    # Mixed-tone sarcasm: positive praise + negative context and/or laughter.
+    has_positive = bool(SARCASM_POSITIVE_WORDS.search(text))
+    has_negative_context = bool(SARCASM_NEGATIVE_CONTEXT.search(text))
+    has_laughter = bool(SARCASM_LAUGHTER.search(text))
+    if has_positive and (has_negative_context or has_laughter):
+        return True
+
     return False
 
 
@@ -129,6 +164,19 @@ def is_polite_tone(text: str) -> bool:
     """Check if message has polite, non-confrontational tone."""
     text_lower = text.lower()
     for pattern in POLITE_INDICATORS:
+        if re.search(pattern, text_lower, re.IGNORECASE):
+            return True
+    return False
+
+
+def is_order_lookup_request(text: str) -> bool:
+    """Return True when a message explicitly asks to track/find an order."""
+    text_lower = text.lower().strip()
+    if re.search(r"\bORD-[A-Z0-9]+\b", text, re.IGNORECASE):
+        return True
+    if re.fullmatch(r"\d{4,6}", text_lower):
+        return True
+    for pattern in ORDER_LOOKUP_PATTERNS:
         if re.search(pattern, text_lower, re.IGNORECASE):
             return True
     return False
@@ -178,8 +226,8 @@ def classify_intent_keyword(text: str) -> tuple[Intent, FrustrationLevel, bool]:
     if scores[Intent.COMPLAINT] > 0:
         return Intent.COMPLAINT, frustration, sarcasm
     
-    # PRIORITY RULE 4: ORDER_TRACKING beats FAQ and GENERAL
-    if scores[Intent.ORDER_TRACKING] > 0:
+    # PRIORITY RULE 4: ORDER_TRACKING only when request is explicit/actionable
+    if scores[Intent.ORDER_TRACKING] > 0 and is_order_lookup_request(text):
         return Intent.ORDER_TRACKING, frustration, sarcasm
     
     # PRIORITY RULE 5: FAQ beats GREETING and GENERAL

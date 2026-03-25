@@ -1,6 +1,6 @@
 """Chat-related Pydantic models."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pydantic import BaseModel, Field
 
@@ -19,10 +19,15 @@ class Intent(str, Enum):
     GREETING = "greeting"
 
 
+def _utc_now() -> datetime:
+    """Return a timezone-aware UTC timestamp for stable client parsing."""
+    return datetime.now(timezone.utc)
+
+
 class Message(BaseModel):
     role: MessageRole
     content: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utc_now)
 
 
 class ChatRequest(BaseModel):
@@ -36,7 +41,7 @@ class ChatResponse(BaseModel):
     session_id: str
     intent: Intent | None = None
     metadata: dict | None = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utc_now)
 
 
 class StreamChunk(BaseModel):

@@ -1,9 +1,14 @@
 """Tests for chat orchestrator and intent classification."""
 
+from datetime import timezone
+
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
+from app.db.models import Ticket
 from app.models.chat import ChatRequest, Intent
+from app.models.faq import FAQEntry
 from app.services.chat.intent import classify_intent
 from app.services.chat.orchestrator import ChatOrchestrator
 
@@ -45,6 +50,19 @@ class TestIntentClassification:
         intent, _, _ = classify_intent("Tell me a joke")
         assert intent == Intent.GENERAL
 
+    def test_sarcasm_maps_to_complaint_not_order_tracking(self):
+        intent, _, sarcasm = classify_intent(
+            "your services is so good i am never getting my order on time hahaha"
+        )
+        assert intent == Intent.COMPLAINT
+        assert sarcasm is True
+
+    def test_legal_threat_with_order_words_maps_to_complaint(self):
+        intent, _, _ = classify_intent(
+            "order is delivered but i have lost it i will do legal action on you guys"
+        )
+        assert intent == Intent.COMPLAINT
+
 
 @pytest.mark.asyncio
 class TestChatOrchestrator:
@@ -58,6 +76,19 @@ class TestChatOrchestrator:
         assert response.intent == Intent.GREETING
         assert response.session_id
         assert "Welcome" in response.message
+
+    async def test_chat_response_timestamp_is_timezone_aware_utc(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+        response = await orchestrator.handle_message(
+            ChatRequest(message="Hello!", channel="test")
+        )
+
+        assert response.timestamp.tzinfo is not None
+        assert response.timestamp.utcoffset() == timezone.utc.utcoffset(response.timestamp)
 
     async def test_order_tracking_asks_for_id(self, mock_llm, mock_vector_store, db_session):
         orchestrator = ChatOrchestrator(
@@ -123,3 +154,303 @@ class TestChatOrchestrator:
         response2 = await orchestrator.handle_message(request2)
 
         assert response1.session_id == response2.session_id
+
+    async def test_ticket_inquiry_not_misrouted_to_order(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+        request = ChatRequest(message="do i have any ticket", channel="test")
+        response = await orchestrator.handle_message(request)
+
+        assert response.intent == Intent.COMPLAINT
+        assert "order id" not in response.message.lower()
+        assert response.metadata is not None
+        assert "ticket_found" in response.metadata
+
+    async def test_awaiting_order_state_allows_topic_switch(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+
+        first = await orchestrator.handle_message(
+            ChatRequest(message="where is my order?", channel="test")
+        )
+        assert first.intent == Intent.ORDER_TRACKING
+        assert "order id" in first.message.lower()
+
+        second = await orchestrator.handle_message(
+            ChatRequest(
+                message="i am disappointed with your services",
+                session_id=first.session_id,
+                channel="test",
+            )
+        )
+        assert second.intent == Intent.COMPLAINT
+        assert "order id" not in second.message.lower()
+
+    async def test_awaiting_order_state_does_not_force_order_on_legal_threat(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+
+        first = await orchestrator.handle_message(
+            ChatRequest(message="where is my order?", channel="test")
+        )
+        assert first.intent == Intent.ORDER_TRACKING
+
+        second = await orchestrator.handle_message(
+            ChatRequest(
+                message="order is delivered but i have lost it i will do legal action on you guys",
+                session_id=first.session_id,
+                channel="test",
+            )
+        )
+        assert second.intent == Intent.COMPLAINT
+        assert "order id" not in second.message.lower()
+
+    async def test_sarcastic_order_feedback_stays_calm_and_not_order_loop(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+        response = await orchestrator.handle_message(
+            ChatRequest(
+                message="your services is so good i am never getting my order on time hahaha",
+                channel="test",
+            )
+        )
+
+        assert response.intent == Intent.COMPLAINT
+        assert "order id" not in response.message.lower()
+
+    async def test_duplicate_ticket_request_returns_existing_ticket_and_email(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+
+        first = await orchestrator.handle_message(
+            ChatRequest(message="I am very disappointed with your service", channel="test")
+        )
+        second = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=first.session_id, channel="test")
+        )
+        assert "email" in second.message.lower()
+
+        third = await orchestrator.handle_message(
+            ChatRequest(message="anb@gmail.com", session_id=first.session_id, channel="test")
+        )
+        assert third.metadata is not None
+        first_ticket_id = third.metadata["ticket_id"]
+
+        duplicate = await orchestrator.handle_message(
+            ChatRequest(
+                message="creat a new ticket for me",
+                session_id=first.session_id,
+                channel="test",
+            )
+        )
+
+        assert duplicate.intent == Intent.COMPLAINT
+        assert f"#{first_ticket_id[:8]}" in duplicate.message
+        assert '"anb@gmail.com"' in duplicate.message
+        assert duplicate.metadata is not None
+        assert duplicate.metadata.get("existing_ticket_id") == first_ticket_id
+
+        result = await db_session.execute(
+            select(Ticket).where(Ticket.session_id == first.session_id)
+        )
+        tickets = result.scalars().all()
+        assert len(tickets) == 1
+
+    async def test_email_collection_allows_topic_switch_to_faq(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        mock_llm.response = "You can update your shipping address before dispatch."
+        await mock_vector_store.upsert(
+            [
+                FAQEntry(
+                    question="Can I change my shipping address after ordering?",
+                    answer="Yes, you can request an address update before the order is dispatched.",
+                    category="shipping",
+                )
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+
+        start = await orchestrator.handle_message(
+            ChatRequest(message="I am disappointed with your service", channel="test")
+        )
+        assert "1 or 2" in start.message.lower()
+
+        choose = await orchestrator.handle_message(
+            ChatRequest(message="go with first", session_id=start.session_id, channel="test")
+        )
+        assert "email" in choose.message.lower()
+
+        bad_email = await orchestrator.handle_message(
+            ChatRequest(message="6366363", session_id=start.session_id, channel="test")
+        )
+        assert "email format" in bad_email.message.lower()
+
+        faq = await orchestrator.handle_message(
+            ChatRequest(
+                message="Can I change my shipping address after ordering?",
+                session_id=start.session_id,
+                channel="test",
+            )
+        )
+        assert faq.intent == Intent.FAQ
+        assert "share your email so i can submit the ticket" not in faq.message.lower()
+        assert faq.metadata is not None
+        assert faq.metadata.get("ticket_flow_cancelled") is True
+
+    async def test_email_collection_exit_phrase_cancels_ticket_flow(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        mock_llm.response = "Sure, what would you like to know?"
+        await mock_vector_store.upsert(
+            [
+                FAQEntry(
+                    question="Can I change my shipping address after ordering?",
+                    answer="Yes, before dispatch.",
+                    category="shipping",
+                )
+            ]
+        )
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+
+        start = await orchestrator.handle_message(
+            ChatRequest(message="I am disappointed with your service", channel="test")
+        )
+        choose = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=start.session_id, channel="test")
+        )
+        assert "email" in choose.message.lower()
+
+        cancel = await orchestrator.handle_message(
+            ChatRequest(
+                message="no i do not want to complain just answer my question",
+                session_id=start.session_id,
+                channel="test",
+            )
+        )
+        assert cancel.intent == Intent.GENERAL
+        assert "canceled ticket creation" in cancel.message.lower()
+        assert cancel.metadata is not None
+        assert cancel.metadata.get("ticket_flow_cancelled") is True
+
+        faq = await orchestrator.handle_message(
+            ChatRequest(
+                message="Can I change my shipping address after ordering?",
+                session_id=start.session_id,
+                channel="test",
+            )
+        )
+        assert faq.intent == Intent.FAQ
+        assert "email" not in faq.message.lower()
+
+    async def test_email_extraction_and_confirmation_before_ticket_creation(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+
+        step1 = await orchestrator.handle_message(
+            ChatRequest(message="I am disappointed with your service", channel="test")
+        )
+        step2 = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=step1.session_id, channel="test")
+        )
+        assert "email" in step2.message.lower()
+
+        step3 = await orchestrator.handle_message(
+            ChatRequest(
+                message="my emai is test@gmail.com",
+                session_id=step1.session_id,
+                channel="test",
+            )
+        )
+        assert step3.intent == Intent.COMPLAINT
+        assert '"test@gmail.com"' in step3.message
+        assert "confirm" in step3.message.lower()
+        assert step3.metadata is not None
+        assert step3.metadata.get("awaiting_email_confirmation") is True
+
+        step4 = await orchestrator.handle_message(
+            ChatRequest(message="yes", session_id=step1.session_id, channel="test")
+        )
+        assert step4.intent == Intent.COMPLAINT
+        assert step4.metadata is not None
+        assert "ticket_id" in step4.metadata
+        assert "test@gmail.com" in step4.message
+
+        result = await db_session.execute(
+            select(Ticket).where(Ticket.session_id == step1.session_id)
+        )
+        tickets = result.scalars().all()
+        assert len(tickets) == 1
+
+    async def test_email_confirmation_change_path_uses_updated_email(
+        self, mock_llm, mock_vector_store, db_session
+    ):
+        orchestrator = ChatOrchestrator(
+            llm=mock_llm, vector_store=mock_vector_store, db=db_session
+        )
+
+        step1 = await orchestrator.handle_message(
+            ChatRequest(message="I am disappointed with your service", channel="test")
+        )
+        await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=step1.session_id, channel="test")
+        )
+
+        step3 = await orchestrator.handle_message(
+            ChatRequest(
+                message="my email is wrong@mail.com",
+                session_id=step1.session_id,
+                channel="test",
+            )
+        )
+        assert step3.metadata is not None
+        assert step3.metadata.get("awaiting_email_confirmation") is True
+
+        step4 = await orchestrator.handle_message(
+            ChatRequest(
+                message="change",
+                session_id=step1.session_id,
+                channel="test",
+            )
+        )
+        assert "share the email" in step4.message.lower()
+
+        step5 = await orchestrator.handle_message(
+            ChatRequest(
+                message="use better@mail.com",
+                session_id=step1.session_id,
+                channel="test",
+            )
+        )
+        assert '"better@mail.com"' in step5.message
+        assert step5.metadata is not None
+        assert step5.metadata.get("awaiting_email_confirmation") is True
+
+        step6 = await orchestrator.handle_message(
+            ChatRequest(message="yes", session_id=step1.session_id, channel="test")
+        )
+        assert step6.metadata is not None
+        assert "ticket_id" in step6.metadata
+        assert "better@mail.com" in step6.message

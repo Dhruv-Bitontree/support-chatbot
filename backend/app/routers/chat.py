@@ -4,9 +4,10 @@ import json
 import logging
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.database import get_db
+from app.db.database import async_session, get_db
 from app.dependencies import get_faq_store, get_llm
 from app.models.chat import ChatRequest, ChatResponse
 from app.services.chat.orchestrator import ChatOrchestrator
@@ -33,7 +34,6 @@ async def chat_websocket(
     websocket: WebSocket,
     llm: LLMProvider = Depends(get_llm),
     vector_store: VectorStore = Depends(get_faq_store),
-    db: AsyncSession = Depends(get_db),
 ):
     await websocket.accept()
     session_id = None
@@ -48,10 +48,12 @@ async def chat_websocket(
                     session_id=session_id or payload.get("session_id"),
                     channel=payload.get("channel", "websocket"),
                 )
-                orchestrator = ChatOrchestrator(
-                    llm=llm, vector_store=vector_store, db=db
-                )
-                response = await orchestrator.handle_message(request)
+                async with async_session() as db:
+                    orchestrator = ChatOrchestrator(
+                        llm=llm, vector_store=vector_store, db=db
+                    )
+                    response = await orchestrator.handle_message(request)
+                    await db.commit()
                 session_id = response.session_id
 
                 await websocket.send_text(
@@ -65,6 +67,15 @@ async def chat_websocket(
             except json.JSONDecodeError:
                 await websocket.send_text(
                     json.dumps({"error": "Invalid JSON"})
+                )
+            except ValidationError as exc:
+                await websocket.send_text(
+                    json.dumps({"error": "Invalid request payload", "detail": str(exc)})
+                )
+            except Exception as exc:
+                logger.exception("WebSocket message handling failed: %s", exc)
+                await websocket.send_text(
+                    json.dumps({"error": "Internal server error"})
                 )
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: session={session_id}")

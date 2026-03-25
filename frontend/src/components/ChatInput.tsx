@@ -35,14 +35,13 @@ export default function ChatInput({
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
-    // Auto-resize
     const el = e.target;
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 120) + "px";
   };
 
   return (
-    <div className="border-t border-gray-200 p-3 bg-white">
+    <div className="border-t border-slate-200 bg-white/95 px-3 py-3 backdrop-blur">
       <div className="flex items-end gap-2">
         <textarea
           ref={textareaRef}
@@ -52,22 +51,24 @@ export default function ChatInput({
           placeholder={placeholder}
           disabled={disabled}
           rows={1}
-          className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-2.5 text-sm
-                     focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent
-                     disabled:opacity-50 disabled:bg-gray-50 max-h-[120px]"
+          className="max-h-[120px] flex-1 resize-none rounded-2xl border border-slate-300 bg-white
+                     px-4 py-2.5 text-[15px] leading-6 text-slate-900 placeholder:text-slate-400 shadow-sm
+                     transition focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-200
+                     disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
         />
         <button
           onClick={handleSend}
           disabled={disabled || !input.trim()}
-          className="flex-shrink-0 w-10 h-10 rounded-xl bg-primary-600 text-white
-                     flex items-center justify-center hover:bg-primary-700
-                     disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          aria-label="Send message"
+          className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl bg-primary-600 text-white
+                     shadow-md shadow-primary-600/20 transition hover:bg-primary-700 active:scale-95
+                     disabled:cursor-not-allowed disabled:opacity-50"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
             viewBox="0 0 24 24"
             fill="currentColor"
-            className="w-5 h-5"
+            className="h-5 w-5"
           >
             <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
           </svg>

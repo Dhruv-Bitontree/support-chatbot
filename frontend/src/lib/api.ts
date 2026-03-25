@@ -23,8 +23,11 @@ async function request<T>(
   });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new APIError(res.status, body.error || res.statusText);
+    const data = await res
+      .json()
+      .catch(() => ({} as { error?: string; detail?: string }));
+    const errorMessage = data.error || data.detail || "Something went wrong.";
+    throw new APIError(res.status, errorMessage);
   }
 
   return res.json();
