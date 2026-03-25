@@ -8,7 +8,12 @@ export default function ChatWidget() {
   const [isOpen, setIsOpen] = useState(false);
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+    <div
+      className={cn(
+        "fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3",
+        isOpen && "max-[479px]:inset-0 max-[479px]:bottom-0 max-[479px]:right-0 max-[479px]:gap-0",
+      )}
+    >
       <div
         className={cn(
           "origin-bottom-right transition-all duration-300 ease-in-out",
@@ -17,7 +22,7 @@ export default function ChatWidget() {
             : "pointer-events-none scale-95 opacity-0",
         )}
       >
-        <div className="h-[min(78vh,560px)] w-[min(92vw,380px)] overflow-hidden rounded-3xl shadow-2xl">
+        <div className="h-[min(78vh,560px)] w-[min(92vw,380px)] overflow-hidden rounded-3xl shadow-2xl max-[479px]:h-[100dvh] max-[479px]:w-screen max-[479px]:rounded-none max-[479px]:shadow-none">
           <ChatWindow embedded />
         </div>
       </div>
@@ -26,7 +31,7 @@ export default function ChatWidget() {
         onClick={() => setIsOpen(!isOpen)}
         aria-label={isOpen ? "Close chat" : "Open chat"}
         className={cn(
-          "flex h-14 w-14 items-center justify-center rounded-full text-white shadow-lg shadow-primary-600/25 transition-all duration-200",
+          "flex h-14 w-14 min-h-11 min-w-11 items-center justify-center rounded-full text-white shadow-lg shadow-primary-600/25 transition-all duration-200 max-[479px]:fixed max-[479px]:bottom-4 max-[479px]:right-4",
           isOpen
             ? "rotate-0 bg-slate-600 hover:bg-slate-700"
             : "bg-primary-600 hover:-translate-y-0.5 hover:bg-primary-700",

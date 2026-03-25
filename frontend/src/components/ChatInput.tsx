@@ -41,7 +41,7 @@ export default function ChatInput({
   };
 
   return (
-    <div className="border-t border-slate-200 bg-white/95 px-3 py-3 backdrop-blur">
+    <div className="sticky bottom-0 z-20 border-t border-slate-200 bg-white/95 px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] backdrop-blur">
       <div className="flex items-end gap-2">
         <textarea
           ref={textareaRef}

@@ -2,11 +2,11 @@
 
 export default function TypingIndicator() {
   return (
-    <div className="flex items-end gap-2 mb-4">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium bg-gray-200 text-gray-600">
+    <div className="mb-4 flex max-w-full items-end gap-2 overflow-hidden">
+      <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gray-200 text-sm font-medium text-gray-600">
         AI
       </div>
-      <div className="bg-gray-100 rounded-2xl rounded-bl-sm px-4 py-3">
+      <div className="max-w-[75%] rounded-2xl rounded-bl-sm bg-gray-100 px-4 py-3">
         <div className="flex gap-1">
           {[0, 1, 2].map((i) => (
             <div

@@ -107,7 +107,11 @@ export default function ChatWindow({ embedded = false }: Props) {
   }, [isLoading, messages.length, clearSession]);
 
   return (
-    <div className="relative flex h-full flex-col overflow-hidden rounded-3xl border border-slate-200/80 bg-white/95 shadow-[0_18px_48px_rgba(15,23,42,0.14)] backdrop-blur">
+    <div
+      className={`relative flex h-full flex-col overflow-hidden rounded-none border-0 bg-white/95 shadow-none backdrop-blur sm:rounded-3xl sm:border sm:border-slate-200/80 sm:shadow-[0_18px_48px_rgba(15,23,42,0.14)] ${
+        embedded ? "max-[479px]:rounded-none max-[479px]:border-0 max-[479px]:shadow-none" : ""
+      }`}
+    >
       <div className="relative overflow-hidden bg-gradient-to-r from-primary-700 via-primary-600 to-blue-500 px-5 py-4 text-white">
         <div className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full bg-white/10" />
         <div className="flex items-center justify-between gap-3">
@@ -140,7 +144,7 @@ export default function ChatWindow({ embedded = false }: Props) {
               onClick={handleNewSession}
               type="button"
               disabled={isLoading}
-              className="rounded-lg bg-white/20 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/30 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-white/40"
+              className="min-h-11 rounded-lg bg-white/20 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-white/30 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-white/40"
             >
               New chat
             </button>
@@ -198,14 +202,14 @@ export default function ChatWindow({ embedded = false }: Props) {
               <button
                 onClick={() => setShowResetDialog(false)}
                 type="button"
-                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                className="min-h-11 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
               >
                 Cancel
               </button>
               <button
                 onClick={clearSession}
                 type="button"
-                className="rounded-xl bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-300"
+                className="min-h-11 rounded-xl bg-primary-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-300"
               >
                 OK
               </button>

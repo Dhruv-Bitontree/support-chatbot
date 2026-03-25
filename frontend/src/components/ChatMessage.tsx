@@ -16,7 +16,7 @@ export default function ChatMessage({ message }: Props) {
 
   return (
     <div className={cn("mb-4 flex w-full", isUser ? "justify-end" : "justify-start")}>
-      <div className={cn("flex max-w-[84%] items-end gap-2", isUser && "flex-row-reverse")}>
+      <div className={cn("flex max-w-[85%] items-end gap-2 sm:max-w-[84%]", isUser && "flex-row-reverse")}>
         <div
           className={cn(
             "flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-sm font-semibold",

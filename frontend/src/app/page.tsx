@@ -4,32 +4,34 @@ export default function HomePage() {
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
       {/* Hero Section */}
-      <div className="max-w-4xl mx-auto px-6 py-20">
+      <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6 sm:py-20">
         <div className="text-center">
           <div className="inline-flex items-center gap-2 bg-primary-100 text-primary-700 text-sm font-medium px-4 py-1.5 rounded-full mb-6">
             <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
             AI-Powered Support
           </div>
-          <h1 className="text-5xl font-bold text-gray-900 mb-4">
+          <h1 className="mb-4 text-[clamp(2rem,9vw,3rem)] font-bold text-gray-900 md:text-5xl">
             Customer Support
             <span className="text-primary-600"> Chatbot</span>
           </h1>
-          <p className="text-lg text-gray-600 max-w-2xl mx-auto mb-8">
+          <p className="mx-auto mb-8 max-w-2xl text-base text-gray-600 sm:text-lg">
             Get instant help with FAQs, order tracking, and support tickets.
             Our AI assistant is available 24/7 to answer your questions.
           </p>
-          <div className="flex gap-4 justify-center">
+          <div className="flex justify-center gap-4 max-[479px]:flex-col">
             <a
               href="/chat"
-              className="px-6 py-3 bg-primary-600 text-white rounded-xl font-medium
+              className="flex min-h-11 items-center justify-center rounded-xl bg-primary-600 px-6 py-3 font-medium text-white
+                         max-[479px]:w-full
                          hover:bg-primary-700 transition-colors shadow-md shadow-primary-200"
             >
               Open Full Chat
             </a>
             <a
               href="#features"
-              className="px-6 py-3 bg-white text-gray-700 rounded-xl font-medium
-                         hover:bg-gray-50 transition-colors border border-gray-200"
+              className="flex min-h-11 items-center justify-center rounded-xl border border-gray-200 bg-white px-6 py-3 font-medium text-gray-700
+                         max-[479px]:w-full
+                         hover:bg-gray-50 transition-colors"
             >
               Learn More
             </a>
@@ -37,7 +39,7 @@ export default function HomePage() {
         </div>
 
         {/* Features */}
-        <div id="features" className="grid md:grid-cols-3 gap-6 mt-20">
+        <div id="features" className="mt-12 grid grid-cols-1 gap-4 sm:mt-20 sm:gap-6 md:grid-cols-3">
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
             <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center mb-4">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-blue-600">
@@ -83,7 +85,7 @@ export default function HomePage() {
         </div>
 
         {/* API Section */}
-        <div className="mt-16 bg-white p-8 rounded-2xl shadow-sm border border-gray-100">
+        <div className="mt-16 rounded-2xl border border-gray-100 bg-white p-5 shadow-sm sm:p-8">
           <h2 className="text-2xl font-bold text-gray-900 mb-4">
             Multi-Channel API
           </h2>
