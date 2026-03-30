@@ -4,7 +4,7 @@
   var config = {
     apiUrl:
       document.currentScript?.getAttribute("data-api-url") ||
-      "http://localhost:3000",
+      window.location.origin,
   };
 
   // Create widget container

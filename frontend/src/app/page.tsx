@@ -1,6 +1,11 @@
 import ChatWidget from "@/components/ChatWidget";
 
 export default function HomePage() {
+  const frontendUrl =
+    process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000";
+  const backendApiUrl =
+    process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
       {/* Hero Section */}
@@ -95,13 +100,13 @@ export default function HomePage() {
           </p>
           <div className="bg-gray-900 text-gray-100 p-4 rounded-xl text-sm font-mono overflow-x-auto">
             <pre>{`# REST API
-curl -X POST http://localhost:8000/api/chat \\
+curl -X POST ${backendApiUrl}/chat \\
   -H "Content-Type: application/json" \\
   -d '{"message": "What is your return policy?"}'
 
 # Embeddable Widget
-<script src="http://localhost:3000/widget.js"
-        data-api-url="http://localhost:8000/api">
+<script src="${frontendUrl}/widget.js"
+        data-api-url="${backendApiUrl}">
 </script>`}</pre>
           </div>
         </div>

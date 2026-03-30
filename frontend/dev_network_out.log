@@ -1,0 +1,36 @@
+
+> support-chatbot-frontend@1.0.0 dev:network
+> next dev --hostname 0.0.0.0 --port 3000
+
+   ▲ Next.js 15.5.14
+   - Local:        http://localhost:3000
+   - Network:      http://0.0.0.0:3000
+   - Environments: .env.local, .env
+
+ ✓ Starting...
+ ✓ Ready in 2.8s
+ ○ Compiling / ...
+ ✓ Compiled / in 1785ms (553 modules)
+ GET / 200 in 2697ms
+   Reload env: .env.local
+ ✓ Compiled in 401ms (228 modules)
+   Reload env: .env.local
+ ✓ Compiled in 195ms (228 modules)
+   Reload env: .env.local
+ ✓ Compiled in 207ms (228 modules)
+ ✓ Compiled / in 389ms (325 modules)
+ ○ Compiling /_error ...
+ ✓ Compiled /_error in 4.4s (905 modules)
+ GET / 500 in 8370ms
+ GET / 200 in 408ms
+ GET / 200 in 84ms
+ GET / 200 in 200ms
+ GET / 200 in 75ms
+ GET / 200 in 76ms
+ GET / 200 in 135ms
+ GET / 200 in 233ms
+ GET / 200 in 156ms
+ GET / 200 in 130ms
+ GET / 200 in 170ms
+ ✓ Compiled in 933ms (905 modules)
+[?25h

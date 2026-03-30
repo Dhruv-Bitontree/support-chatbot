@@ -40,8 +40,8 @@ class Settings(BaseSettings):
 
     # Server
     backend_port: int = 8000
-    frontend_url: str = "http://localhost:3000"
-    allowed_origins: list[str] = ["http://localhost:3000", "http://localhost:3001"]
+    frontend_url: str = "http://192.168.1.25:3000"
+    allowed_origins: list[str]
     log_level: str = "info"
 
     # Sentiment thresholds

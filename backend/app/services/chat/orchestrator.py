@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ChatMessage, ChatSession
+from app.exceptions import OrderNotFoundError
 from app.models.chat import ChatRequest, ChatResponse, Intent, Message, MessageRole
 from app.models.complaint import ComplaintRequest
 from app.services.chat.intent import FrustrationLevel, classify_intent, classify_intent_llm, is_order_lookup_request
@@ -26,6 +27,7 @@ from app.services.complaints.sentiment import analyze_sentiment
 from app.services.complaints.ticket_service import TicketService
 from app.services.faq.base import VectorStore
 from app.services.llm.base import LLMProvider
+from app.services.orders.order_id_utils import looks_like_explicit_order_reference, normalize_order_id
 from app.services.orders.order_service import OrderService
 
 logger = logging.getLogger(__name__)
@@ -34,14 +36,42 @@ logger = logging.getLogger(__name__)
 class ConversationState(str, Enum):
     NORMAL = "NORMAL_CHAT"
     AWAITING_ORDER = "AWAITING_ORDER_ID"
+    AWAITING_ISSUE_CATEGORY = "AWAITING_ISSUE_CATEGORY"
+    AWAITING_ISSUE_SUMMARY = "AWAITING_ISSUE_SUMMARY"
     SUPPORT_OPTIONS = "SUPPORT_OPTIONS"
     EMAIL_COLLECTION = "EMAIL_COLLECTION"
 
 
-CONVERSATION_HISTORY_LIMIT = 6
+CONVERSATION_HISTORY_LIMIT = 12
 AUTO_ESCALATE_THRESHOLD = -0.9
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 EMAIL_CANDIDATE_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+ISSUE_CATEGORY_OPTIONS = {
+    "1": "order_tracking",
+    "2": "refund",
+    "3": "damaged_or_wrong_item",
+    "4": "payment_or_charge",
+    "5": "faq_or_policy",
+    "6": "account",
+    "7": "other",
+}
+
+ISSUE_CATEGORY_LABELS = {
+    "order_tracking": "order, delivery, or tracking",
+    "refund": "refund or return",
+    "damaged_or_wrong_item": "damaged or wrong item",
+    "payment_or_charge": "payment or charge",
+    "faq_or_policy": "FAQ or policy",
+    "account": "account",
+    "other": "something else",
+}
+
+ORDER_RELATED_ISSUE_CATEGORIES = {
+    "order_tracking",
+    "refund",
+    "damaged_or_wrong_item",
+}
 
 PROMPT_INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?previous\s+instructions",
@@ -149,30 +179,74 @@ class ChatOrchestrator:
         if current_state == ConversationState.SUPPORT_OPTIONS.value or metadata.get("offered_ticket_options"):
             return await self._handle_ticket_confirmation(request.message, session_id, metadata)
 
+        if (
+            current_state == ConversationState.AWAITING_ISSUE_CATEGORY.value
+            or metadata.get("awaiting_issue_category")
+        ):
+            return await self._handle_issue_category_collection(request.message, session_id, metadata)
+
+        if (
+            current_state == ConversationState.AWAITING_ISSUE_SUMMARY.value
+            or metadata.get("awaiting_issue_summary")
+        ):
+            return await self._handle_issue_summary_collection(request.message, session_id, metadata)
+
         if current_state == ConversationState.AWAITING_ORDER.value or metadata.get("awaiting_order_id"):
+            if self._is_flow_cancel_request(request.message):
+                await self._store_message(session_id, MessageRole.USER, request.message, Intent.GENERAL, None)
+                cleared_updates = {
+                    **self._clear_complaint_pending_updates(),
+                    "active_order_id": None if not metadata.get("active_order_confirmed") else metadata.get("active_order_id"),
+                    "active_order_confirmed": bool(metadata.get("active_order_confirmed")),
+                }
+                await self._update_session_metadata(
+                    session_id,
+                    cleared_updates,
+                )
+                metadata.update(cleared_updates)
+                reply = "Understood. I canceled that lookup for now. If you want to resume, just share the order ID later."
+                await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.GENERAL, None)
+                return ChatResponse(
+                    message=reply,
+                    session_id=session_id,
+                    intent=Intent.GENERAL,
+                    metadata={"ticket_flow_cancelled": True},
+                )
+
             if self._looks_like_order_followup(request.message):
-                await self._store_message(session_id, MessageRole.USER, request.message, Intent.ORDER_TRACKING, None)
-                response_text, meta_out = await self._handle_order(request.message, session_id, metadata)
-                await self._store_message(session_id, MessageRole.ASSISTANT, response_text, Intent.ORDER_TRACKING, None)
+                response_intent = (
+                    Intent.COMPLAINT if metadata.get("complaint_ticket_requested") or metadata.get("issue_category") else Intent.ORDER_TRACKING
+                )
+                await self._store_message(session_id, MessageRole.USER, request.message, response_intent, None)
+                if metadata.get("complaint_ticket_requested") or metadata.get("issue_category"):
+                    response_text, meta_out = await self._handle_complaint_order_id_collection(
+                        request.message,
+                        session_id,
+                        metadata,
+                    )
+                else:
+                    response_text, meta_out = await self._handle_order(request.message, session_id, metadata)
+                await self._store_message(session_id, MessageRole.ASSISTANT, response_text, response_intent, None)
                 return ChatResponse(
                     message=response_text,
                     session_id=session_id,
-                    intent=Intent.ORDER_TRACKING,
+                    intent=response_intent,
                     metadata=meta_out,
                 )
 
             # User switched topic while we were waiting for an order ID.
+            cleared_updates = self._clear_complaint_pending_updates()
             await self._update_session_metadata(
                 session_id,
-                {"awaiting_order_id": False, "state": ConversationState.NORMAL.value},
+                cleared_updates,
             )
-            metadata["awaiting_order_id"] = False
-            metadata["state"] = ConversationState.NORMAL.value
+            metadata.update(cleared_updates)
 
         if self._is_ticket_creation_request(request.message):
             existing_ticket = await self.ticket_service.get_latest_ticket_for_session(session_id)
             if existing_ticket:
                 await self._store_message(session_id, MessageRole.USER, request.message, Intent.COMPLAINT, None)
+                await self._sync_existing_ticket_metadata(session_id, existing_ticket, metadata)
                 draft_reply, meta_out = self._build_existing_ticket_reply(existing_ticket, metadata)
                 response_text = await self._compose_operational_reply(
                     session_id=session_id,
@@ -188,59 +262,20 @@ class ChatOrchestrator:
                     intent=Intent.COMPLAINT,
                     metadata=meta_out,
                 )
-            last_email = metadata.get("last_provided_email")
-            if isinstance(last_email, str) and EMAIL_RE.match(last_email):
-                await self._store_message(session_id, MessageRole.USER, request.message, Intent.COMPLAINT, None)
-                await self._update_session_metadata(
-                    session_id,
-                    {
-                        "offered_ticket_options": False,
-                        "awaiting_email": True,
-                        "awaiting_email_confirmation": True,
-                        "pending_email": last_email,
-                        "email_attempts": 0,
-                        "original_complaint_message": request.message,
-                        "state": ConversationState.EMAIL_COLLECTION.value,
-                    },
-                )
-                reply = (
-                    f'I found this email from earlier in this chat: "{last_email}". '
-                    'Is this correct? Reply "yes" to confirm or "change" to provide another email.'
-                )
-                await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.COMPLAINT, None)
-                return ChatResponse(
-                    message=reply,
-                    session_id=session_id,
-                    intent=Intent.COMPLAINT,
-                    metadata={
-                        "awaiting_email": True,
-                        "awaiting_email_confirmation": True,
-                        "extracted_email": last_email,
-                    },
-                )
             await self._store_message(session_id, MessageRole.USER, request.message, Intent.COMPLAINT, None)
-            await self._update_session_metadata(
+            response_text, meta_out = await self._start_complaint_intake(
+                request.message,
                 session_id,
-                {
-                    "offered_ticket_options": False,
-                    "awaiting_email": True,
-                    "awaiting_email_confirmation": False,
-                    "pending_email": None,
-                    "email_attempts": 0,
-                    "original_complaint_message": request.message,
-                    "state": ConversationState.EMAIL_COLLECTION.value,
-                },
+                metadata,
+                ticket_requested=True,
+                source_intent=Intent.COMPLAINT,
             )
-            reply = (
-                "Absolutely, I can create a support ticket. Could you share your email so our team can follow up with you? "
-                "If you'd rather not, just type 'skip'."
-            )
-            await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.COMPLAINT, None)
+            await self._store_message(session_id, MessageRole.ASSISTANT, response_text, Intent.COMPLAINT, None)
             return ChatResponse(
-                message=reply,
+                message=response_text,
                 session_id=session_id,
                 intent=Intent.COMPLAINT,
-                metadata={"awaiting_email": True, "awaiting_email_confirmation": False},
+                metadata=meta_out,
             )
 
         if self._is_ticket_inquiry(request.message):
@@ -262,19 +297,12 @@ class ChatOrchestrator:
 
         sentiment_score = analyze_sentiment(request.message).score
 
-        if metadata.get("active_order_confirmed") and intent not in (Intent.ORDER_TRACKING, Intent.COMPLAINT):
-            message_lower = request.message.lower()
-            order_words = {"order", "delivery", "tracking", "package", "shipment"}
-            if not any(word in message_lower for word in order_words):
-                await self._update_session_metadata(
-                    session_id,
-                    {
-                        "active_order_id": None,
-                        "active_order_confirmed": False,
-                        "awaiting_order_id": False,
-                        "state": ConversationState.NORMAL.value,
-                    },
-                )
+        await self._apply_active_order_context_policy(
+            session_id,
+            metadata,
+            message=request.message,
+            intent=intent,
+        )
 
         if intent == Intent.COMPLAINT:
             genuinely_negative = (
@@ -311,16 +339,253 @@ class ChatOrchestrator:
         legacy_map = {
             "NORMAL_CHAT": ConversationState.NORMAL.value,
             "AWAITING_ORDER_ID": ConversationState.AWAITING_ORDER.value,
+            "AWAITING_ISSUE_CATEGORY": ConversationState.AWAITING_ISSUE_CATEGORY.value,
+            "AWAITING_ISSUE_SUMMARY": ConversationState.AWAITING_ISSUE_SUMMARY.value,
             "SUPPORT_OPTIONS": ConversationState.SUPPORT_OPTIONS.value,
             "EMAIL_COLLECTION": ConversationState.EMAIL_COLLECTION.value,
             "TICKET_CREATION": ConversationState.EMAIL_COLLECTION.value,
             "SESSION_LOCKED": ConversationState.NORMAL.value,
             "normal": ConversationState.NORMAL.value,
             "awaiting_order": ConversationState.AWAITING_ORDER.value,
+            "awaiting_issue_category": ConversationState.AWAITING_ISSUE_CATEGORY.value,
+            "awaiting_issue_summary": ConversationState.AWAITING_ISSUE_SUMMARY.value,
             "support_options": ConversationState.SUPPORT_OPTIONS.value,
             "email_collection": ConversationState.EMAIL_COLLECTION.value,
         }
         return legacy_map.get(state, state)
+
+    def _build_support_context(self, metadata: dict | None) -> dict:
+        metadata = metadata or {}
+        return {
+            "current_state": self._resolve_state(metadata),
+            "active_order_id": metadata.get("active_order_id"),
+            "active_order_confirmed": bool(metadata.get("active_order_confirmed")),
+            "active_order_context_idle_turns": int(metadata.get("active_order_context_idle_turns", 0)),
+            "has_open_ticket": bool(metadata.get("has_open_ticket")),
+            "ticket_id": metadata.get("ticket_id"),
+            "customer_email": metadata.get("customer_email"),
+            "awaiting_email": bool(metadata.get("awaiting_email")),
+            "awaiting_order_id": bool(metadata.get("awaiting_order_id")),
+            "issue_category": metadata.get("issue_category"),
+            "issue_summary": metadata.get("issue_summary"),
+            "issue_order_related": metadata.get("issue_order_related"),
+            "ticket_context_collected": metadata.get("ticket_context_collected"),
+        }
+
+    def _complaint_state_updates(
+        self,
+        *,
+        state: ConversationState = ConversationState.NORMAL,
+        awaiting_issue_category: bool = False,
+        awaiting_issue_summary: bool = False,
+        awaiting_order_id: bool = False,
+        complaint_ticket_requested: bool | None = None,
+    ) -> dict:
+        updates = {
+            "state": state.value,
+            "awaiting_issue_category": awaiting_issue_category,
+            "awaiting_issue_summary": awaiting_issue_summary,
+            "awaiting_order_id": awaiting_order_id,
+        }
+        if complaint_ticket_requested is not None:
+            updates["complaint_ticket_requested"] = complaint_ticket_requested
+        return updates
+
+    def _clear_complaint_pending_updates(self) -> dict:
+        return {
+            "state": ConversationState.NORMAL.value,
+            "awaiting_issue_category": False,
+            "awaiting_issue_summary": False,
+            "awaiting_order_id": False,
+            "offered_ticket_options": False,
+            "awaiting_email": False,
+            "awaiting_email_confirmation": False,
+            "pending_email": None,
+            "email_attempts": 0,
+            "complaint_ticket_requested": False,
+            "issue_category": None,
+            "issue_summary": None,
+            "issue_order_related": False,
+            "ticket_context_collected": False,
+            "original_complaint_message": None,
+            "original_sentiment_score": None,
+            "order_lookup_failures": 0,
+            "active_order_context_idle_turns": 0,
+        }
+
+    def _is_flow_cancel_request(self, message: str) -> bool:
+        text = message.lower().strip()
+        cancel_patterns = (
+            r"\bnever\s*mind\b",
+            r"\bforget\s+it\b",
+            r"\bforget\s+support\b",
+            r"\bleave\s+it\b",
+            r"\bleave\s+the\s+complaint\b",
+            r"\bleave\s+support\b",
+            r"\bdrop\s+it\b",
+            r"\bdrop\s+the\s+complaint\b",
+            r"\bcancel\s+(this|it|that|ticket|request|flow)\b",
+            r"\bi\s+do\s+not\s+want\s+to\s+continue\s+(this|it)\b",
+            r"\bi\s+don't\s+want\s+to\s+continue\s+(this|it)\b",
+            r"\bstop\s+this\b",
+            r"\bstop\b",
+            r"\bnot\s+now\b",
+            r"\bno\s+thanks\b",
+        )
+        return any(re.search(pattern, text, re.IGNORECASE) for pattern in cancel_patterns)
+
+    def _normalize_issue_category(self, message: str) -> str | None:
+        text = message.lower().strip()
+        if not text:
+            return None
+
+        for option, category in ISSUE_CATEGORY_OPTIONS.items():
+            if text == option or text == f"option {option}":
+                return category
+
+        keyword_map = {
+            "order_tracking": (
+                "delivery",
+                "tracking",
+                "shipment",
+                "package",
+                "shipping status",
+                "order status",
+                "where is my order",
+                "last order",
+                "recent order",
+            ),
+            "refund": (
+                "refund",
+                "return",
+                "money back",
+                "cancel order",
+            ),
+            "damaged_or_wrong_item": (
+                "damaged",
+                "broken",
+                "wrong item",
+                "incorrect item",
+                "defective",
+                "missing item",
+            ),
+            "payment_or_charge": (
+                "payment",
+                "charged",
+                "charge",
+                "billing",
+                "card",
+                "transaction",
+            ),
+            "faq_or_policy": (
+                "policy",
+                "faq",
+                "warranty",
+                "terms",
+                "return policy",
+            ),
+            "account": (
+                "account",
+                "login",
+                "password",
+                "sign in",
+                "signin",
+                "profile",
+            ),
+            "other": ("other", "something else"),
+        }
+        for category, keywords in keyword_map.items():
+            if any(keyword in text for keyword in keywords):
+                return category
+        return None
+
+    def _is_order_related_issue(self, category: str | None, message_hint: str = "") -> bool:
+        if not category:
+            return False
+        if category in ORDER_RELATED_ISSUE_CATEGORIES:
+            return True
+        if category != "payment_or_charge":
+            return False
+
+        lowered = message_hint.lower()
+        return any(term in lowered for term in ("order", "delivery", "shipment", "item", "refund"))
+
+    def _build_issue_category_prompt(self) -> str:
+        return (
+            "I can help with that. Before I create or escalate anything, what is this about?\n\n"
+            "1. Order, delivery, or tracking\n"
+            "2. Refund or return\n"
+            "3. Damaged or wrong item\n"
+            "4. Payment or charge\n"
+            "5. FAQ or policy\n"
+            "6. Account\n"
+            "7. Something else\n\n"
+            "Reply with the number or short category name."
+        )
+
+    def _build_issue_summary_prompt(self, category: str | None) -> str:
+        label = ISSUE_CATEGORY_LABELS.get(category or "", "issue")
+        return (
+            f"Thanks. Please describe the {label} issue in 1-2 short sentences "
+            "so I can capture the right support details."
+        )
+
+    def _build_order_id_prompt(self, category: str | None) -> str:
+        label = ISSUE_CATEGORY_LABELS.get(category or "", "issue")
+        return (
+            f"Please share the order ID for this {label} issue so I can link the complaint correctly. "
+            "Example: ORD-1001."
+        )
+
+    def _build_order_not_found_reply(self, normalized_order_id: str, attempt_count: int = 1) -> str:
+        if attempt_count <= 1:
+            return (
+                f"I could not find order {normalized_order_id}. "
+                "Please check the order ID and try again. Example format: ORD-1001."
+            )
+        if attempt_count == 2:
+            return (
+                f"I still could not find order {normalized_order_id}. "
+                "Please recheck the order ID from your confirmation email or SMS and try again. "
+                "Example format: ORD-1001."
+            )
+        return (
+            f"I still could not find order {normalized_order_id}. "
+            "Please recheck the order ID from your confirmation email or SMS. "
+            "If you want, I can also help with a return, refund, or general support question without the order lookup."
+        )
+
+    def _build_ticket_description(self, metadata: dict, fallback_message: str) -> str:
+        issue_category = metadata.get("issue_category") or "complaint"
+        issue_summary = metadata.get("issue_summary") or fallback_message
+        order_id = metadata.get("active_order_id") if metadata.get("active_order_confirmed") else None
+        original_message = metadata.get("original_complaint_message") or fallback_message
+
+        lines = [
+            f"Category: {issue_category}",
+            f"Summary: {issue_summary}",
+        ]
+        if order_id:
+            lines.append(f"Order ID: {order_id}")
+        if original_message and original_message != issue_summary:
+            lines.append(f"Original message: {original_message}")
+        return "\n".join(lines)
+
+    def _extract_issue_summary_candidate(self, message: str, category: str | None = None) -> str | None:
+        text = message.strip()
+        if not text:
+            return None
+
+        lowered = text.lower()
+        if self._is_ticket_creation_request(message):
+            return None
+        if looks_like_explicit_order_reference(message):
+            return None
+        if category and self._normalize_issue_category(message) == category and len(lowered.split()) <= 4:
+            return None
+        if len(re.findall(r"[A-Za-z0-9]+", text)) < 4:
+            return None
+        return text
 
     def _validate_input(self, message: str) -> str | None:
         stripped = message.strip()
@@ -341,9 +606,7 @@ class ChatOrchestrator:
     def _looks_like_order_followup(self, message: str) -> bool:
         """Return True when a message likely continues order-tracking flow."""
         message_lower = message.lower().strip()
-        if re.search(r"\bORD-[A-Z0-9]+\b", message, re.IGNORECASE):
-            return True
-        if re.fullmatch(r"\d{4,6}", message_lower):
+        if looks_like_explicit_order_reference(message):
             return True
 
         # If the user sounds angry/sarcastic while we're awaiting an ID,
@@ -429,6 +692,12 @@ class ChatOrchestrator:
             "without ticket",
             "just answer my question",
             "just answer the question",
+            "forget support",
+            "leave the complaint",
+            "leave support",
+            "i don't want to continue this",
+            "i dont want to continue this",
+            "i do not want to continue this",
         )
         return any(phrase in message for phrase in exit_phrases)
 
@@ -504,29 +773,590 @@ class ChatOrchestrator:
         ticket_email = existing_ticket.customer_email or metadata.get("customer_email")
         if ticket_email:
             reply = (
-                f'You already have ticket #{ticket_id_short} in this session. '
-                f'We have already created this ticket for you, and our team will reach out to your given email "{ticket_email}".'
+                f'We already created support ticket #{ticket_id_short} for this conversation. '
+                f'You can keep sharing any additional issue details here, and our team will review them under the same ticket. '
+                f'We will follow up using "{ticket_email}".'
             )
         else:
             reply = (
-                f"You already have ticket #{ticket_id_short} in this session. "
-                "We have already created this ticket for you, and our team is already working on it."
+                f"We already created support ticket #{ticket_id_short} for this conversation. "
+                "You can keep sharing any additional issue details here, and our team will review them under the same ticket."
             )
         meta = {
             "existing_ticket_id": existing_ticket.id,
+            "ticket_id": existing_ticket.id,
             "ticket_status": existing_ticket.status,
             "ticket_found": True,
             "has_email": bool(ticket_email),
+            "has_open_ticket": True,
+            "additional_issue_supported": True,
         }
         if ticket_email:
             meta["customer_email"] = ticket_email
         return reply, meta
 
+    def _existing_ticket_session_updates(self, existing_ticket, metadata: dict | None = None) -> dict:
+        metadata = metadata or {}
+        ticket_email = existing_ticket.customer_email or metadata.get("customer_email")
+        updates = {
+            "has_open_ticket": True,
+            "ticket_id": existing_ticket.id,
+            "state": ConversationState.NORMAL.value,
+            "offered_ticket_options": False,
+            "awaiting_email": False,
+            "awaiting_email_confirmation": False,
+            "pending_email": None,
+            "email_attempts": 0,
+        }
+        if ticket_email:
+            updates["customer_email"] = ticket_email
+        return updates
+
+    async def _sync_existing_ticket_metadata(self, session_id: str, existing_ticket, metadata: dict | None = None) -> dict:
+        updates = self._existing_ticket_session_updates(existing_ticket, metadata)
+        await self._update_session_metadata(session_id, updates)
+        if metadata is not None:
+            metadata.update(updates)
+        return updates
+
+    async def _apply_active_order_context_policy(
+        self,
+        session_id: str,
+        metadata: dict,
+        *,
+        message: str,
+        intent: Intent,
+    ) -> None:
+        if not metadata.get("active_order_confirmed"):
+            return
+
+        message_lower = message.lower()
+        order_words = {"order", "delivery", "tracking", "package", "shipment", "refund"}
+        if intent in (Intent.ORDER_TRACKING, Intent.COMPLAINT) or any(word in message_lower for word in order_words):
+            if metadata.get("active_order_context_idle_turns"):
+                updates = {"active_order_context_idle_turns": 0}
+                await self._update_session_metadata(session_id, updates)
+                metadata.update(updates)
+            return
+
+        explicit_topic_switch = intent == Intent.FAQ and message.strip().endswith("?")
+        idle_turns = int(metadata.get("active_order_context_idle_turns", 0)) + 1
+        if explicit_topic_switch or idle_turns >= 2:
+            updates = {
+                "active_order_id": None,
+                "active_order_confirmed": False,
+                "active_order_context_idle_turns": 0,
+                "awaiting_order_id": False,
+                "order_lookup_failures": 0,
+                "state": ConversationState.NORMAL.value,
+            }
+            await self._update_session_metadata(session_id, updates)
+            metadata.update(updates)
+            return
+
+        updates = {"active_order_context_idle_turns": idle_turns}
+        await self._update_session_metadata(session_id, updates)
+        metadata.update(updates)
+
+    async def _start_complaint_intake(
+        self,
+        message: str,
+        session_id: str,
+        metadata: dict,
+        *,
+        ticket_requested: bool,
+        source_intent: Intent,
+    ) -> tuple[str, dict]:
+        issue_category = metadata.get("issue_category") or self._normalize_issue_category(message)
+        issue_order_related = self._is_order_related_issue(issue_category, message)
+        issue_summary = metadata.get("issue_summary")
+        if not issue_summary and issue_category:
+            issue_summary = self._extract_issue_summary_candidate(message, issue_category)
+
+        updates = {
+            "original_complaint_message": metadata.get("original_complaint_message") or message,
+            "complaint_ticket_requested": bool(ticket_requested or metadata.get("complaint_ticket_requested")),
+            "issue_category": issue_category,
+            "issue_order_related": issue_order_related,
+            "issue_summary": issue_summary,
+            "ticket_context_collected": bool(
+                issue_category
+                and issue_summary
+                and (not issue_order_related or metadata.get("active_order_confirmed"))
+            ),
+        }
+        await self._update_session_metadata(session_id, updates)
+        metadata.update(updates)
+        return await self._advance_complaint_intake(session_id, metadata, message, source_intent=source_intent)
+
+    async def _advance_complaint_intake(
+        self,
+        session_id: str,
+        metadata: dict,
+        user_message: str,
+        *,
+        source_intent: Intent,
+    ) -> tuple[str, dict]:
+        issue_category = metadata.get("issue_category")
+        issue_order_related = self._is_order_related_issue(issue_category, metadata.get("original_complaint_message", ""))
+        metadata["issue_order_related"] = issue_order_related
+
+        if not issue_category:
+            updates = {
+                **self._complaint_state_updates(
+                    state=ConversationState.AWAITING_ISSUE_CATEGORY,
+                    awaiting_issue_category=True,
+                    complaint_ticket_requested=bool(metadata.get("complaint_ticket_requested")),
+                ),
+                "issue_order_related": False,
+                "order_lookup_failures": 0,
+            }
+            await self._update_session_metadata(session_id, updates)
+            metadata.update(updates)
+            draft = self._build_issue_category_prompt()
+            reply = await self._compose_operational_reply(
+                session_id=session_id,
+                user_message=user_message,
+                draft=draft,
+                facts=self._build_support_context(metadata),
+                required_terms=["1", "2", "3", "4", "5", "6", "7"],
+            )
+            return reply, {"awaiting_issue_category": True, "state": ConversationState.AWAITING_ISSUE_CATEGORY.value}
+
+        if issue_order_related and not metadata.get("active_order_confirmed"):
+            updates = self._complaint_state_updates(
+                state=ConversationState.AWAITING_ORDER,
+                awaiting_order_id=True,
+                complaint_ticket_requested=bool(metadata.get("complaint_ticket_requested")),
+            )
+            updates["order_lookup_failures"] = 0
+            await self._update_session_metadata(session_id, updates)
+            metadata.update(updates)
+            draft = self._build_order_id_prompt(issue_category)
+            reply = await self._compose_operational_reply(
+                session_id=session_id,
+                user_message=user_message,
+                draft=draft,
+                facts=self._build_support_context(metadata),
+                required_terms=["order id", "ord-1001"],
+            )
+            return reply, {
+                "awaiting_order_id": True,
+                "issue_category": issue_category,
+                "issue_order_related": True,
+            }
+
+        if not metadata.get("issue_summary"):
+            updates = self._complaint_state_updates(
+                state=ConversationState.AWAITING_ISSUE_SUMMARY,
+                awaiting_issue_summary=True,
+                complaint_ticket_requested=bool(metadata.get("complaint_ticket_requested")),
+            )
+            await self._update_session_metadata(session_id, updates)
+            metadata.update(updates)
+            draft = self._build_issue_summary_prompt(issue_category)
+            reply = await self._compose_operational_reply(
+                session_id=session_id,
+                user_message=user_message,
+                draft=draft,
+                facts=self._build_support_context(metadata),
+                required_terms=["1-2", "issue"],
+            )
+            return reply, {
+                "awaiting_issue_summary": True,
+                "issue_category": issue_category,
+                "issue_order_related": issue_order_related,
+            }
+
+        updates = {
+            "ticket_context_collected": True,
+            **self._complaint_state_updates(
+                state=ConversationState.NORMAL,
+                complaint_ticket_requested=bool(metadata.get("complaint_ticket_requested")),
+            ),
+        }
+        await self._update_session_metadata(session_id, updates)
+        metadata.update(updates)
+
+        if metadata.get("complaint_ticket_requested"):
+            return await self._begin_email_collection_for_ticket(
+                user_message=user_message,
+                session_id=session_id,
+                metadata=metadata,
+            )
+
+        await self._update_session_metadata(
+            session_id,
+            {
+                "offered_ticket_options": True,
+                "state": ConversationState.SUPPORT_OPTIONS.value,
+            },
+        )
+        metadata["offered_ticket_options"] = True
+        metadata["state"] = ConversationState.SUPPORT_OPTIONS.value
+        draft = (
+            "Thanks, I have the basic issue details. Would you like me to:\n\n"
+            "1. Create a support ticket\n"
+            "2. Try to resolve this here\n\n"
+            "Please reply with 1 or 2."
+        )
+        reply = await self._compose_operational_reply(
+            session_id=session_id,
+            user_message=user_message,
+            draft=draft,
+            facts=self._build_support_context(metadata),
+            required_terms=["1", "2", "ticket"],
+        )
+        return reply, {
+            "offered_ticket_options": True,
+            "issue_category": issue_category,
+            "issue_summary": metadata.get("issue_summary"),
+            "issue_order_related": issue_order_related,
+        }
+
+    async def _handle_issue_category_collection(self, message: str, session_id: str, metadata: dict) -> ChatResponse:
+        if self._is_flow_cancel_request(message):
+            await self._store_message(session_id, MessageRole.USER, message, Intent.GENERAL, None)
+            cleared_updates = self._clear_complaint_pending_updates()
+            await self._update_session_metadata(session_id, cleared_updates)
+            metadata.update(cleared_updates)
+            reply = "Understood. I canceled the complaint flow for now. If you want to resume later, just say create ticket."
+            await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.GENERAL, None)
+            return ChatResponse(
+                message=reply,
+                session_id=session_id,
+                intent=Intent.GENERAL,
+                metadata={"ticket_flow_cancelled": True},
+            )
+
+        category = self._normalize_issue_category(message)
+        if category:
+            summary_candidate = self._extract_issue_summary_candidate(message, category)
+            await self._store_message(session_id, MessageRole.USER, message, Intent.COMPLAINT, None)
+            updates = {
+                "issue_category": category,
+                "issue_order_related": self._is_order_related_issue(
+                    category,
+                    metadata.get("original_complaint_message", message),
+                ),
+            }
+            if summary_candidate:
+                updates["issue_summary"] = summary_candidate
+            await self._update_session_metadata(session_id, updates)
+            metadata.update(updates)
+            response_text, meta_out = await self._advance_complaint_intake(
+                session_id,
+                metadata,
+                message,
+                source_intent=Intent.COMPLAINT,
+            )
+            await self._store_message(session_id, MessageRole.ASSISTANT, response_text, Intent.COMPLAINT, None)
+            return ChatResponse(message=response_text, session_id=session_id, intent=Intent.COMPLAINT, metadata=meta_out)
+
+        intent_check, frustration_hint, sarcasm_hint = classify_intent(message)
+        clear_switch = (
+            intent_check == Intent.GREETING
+            or (
+                intent_check in (Intent.FAQ, Intent.ORDER_TRACKING)
+                and message.strip().endswith("?")
+                and frustration_hint == FrustrationLevel.NONE
+                and not sarcasm_hint
+            )
+        )
+        if clear_switch:
+            await self._store_message(session_id, MessageRole.USER, message, intent_check, None)
+            cleared_updates = self._clear_complaint_pending_updates()
+            await self._update_session_metadata(session_id, cleared_updates)
+            metadata.update(cleared_updates)
+            response_text, meta_out = await self._route(intent_check, message, session_id, metadata)
+            await self._store_message(session_id, MessageRole.ASSISTANT, response_text, intent_check, None)
+            route_meta = dict(meta_out or {})
+            route_meta["ticket_flow_cancelled"] = True
+            return ChatResponse(message=response_text, session_id=session_id, intent=intent_check, metadata=route_meta)
+
+        await self._store_message(session_id, MessageRole.USER, message, Intent.COMPLAINT, None)
+        draft = self._build_issue_category_prompt()
+        reply = await self._compose_operational_reply(
+            session_id=session_id,
+            user_message=message,
+            draft=draft,
+            facts=self._build_support_context(metadata),
+            required_terms=["1", "2", "3", "4", "5", "6", "7"],
+        )
+        await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.COMPLAINT, None)
+        return ChatResponse(
+            message=reply,
+            session_id=session_id,
+            intent=Intent.COMPLAINT,
+            metadata={"awaiting_issue_category": True},
+        )
+
+    async def _handle_issue_summary_collection(self, message: str, session_id: str, metadata: dict) -> ChatResponse:
+        if self._is_flow_cancel_request(message):
+            await self._store_message(session_id, MessageRole.USER, message, Intent.GENERAL, None)
+            cleared_updates = self._clear_complaint_pending_updates()
+            await self._update_session_metadata(session_id, cleared_updates)
+            metadata.update(cleared_updates)
+            reply = "Understood. I canceled the complaint flow for now. If you want to resume later, just say create ticket."
+            await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.GENERAL, None)
+            return ChatResponse(
+                message=reply,
+                session_id=session_id,
+                intent=Intent.GENERAL,
+                metadata={"ticket_flow_cancelled": True},
+            )
+
+        summary_candidate = self._extract_issue_summary_candidate(message, metadata.get("issue_category"))
+        intent_check, frustration_hint, sarcasm_hint = classify_intent(message)
+        clear_switch = (
+            intent_check == Intent.GREETING
+            or (
+                intent_check in (Intent.FAQ, Intent.ORDER_TRACKING)
+                and message.strip().endswith("?")
+                and frustration_hint == FrustrationLevel.NONE
+                and not sarcasm_hint
+            )
+        )
+        if clear_switch:
+            await self._store_message(session_id, MessageRole.USER, message, intent_check, None)
+            cleared_updates = self._clear_complaint_pending_updates()
+            await self._update_session_metadata(session_id, cleared_updates)
+            metadata.update(cleared_updates)
+            response_text, meta_out = await self._route(intent_check, message, session_id, metadata)
+            await self._store_message(session_id, MessageRole.ASSISTANT, response_text, intent_check, None)
+            route_meta = dict(meta_out or {})
+            route_meta["ticket_flow_cancelled"] = True
+            return ChatResponse(message=response_text, session_id=session_id, intent=intent_check, metadata=route_meta)
+
+        if not summary_candidate:
+            await self._store_message(session_id, MessageRole.USER, message, Intent.COMPLAINT, None)
+            draft = self._build_issue_summary_prompt(metadata.get("issue_category"))
+            reply = await self._compose_operational_reply(
+                session_id=session_id,
+                user_message=message,
+                draft=draft,
+                facts=self._build_support_context(metadata),
+                required_terms=["issue", "1-2"],
+            )
+            await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.COMPLAINT, None)
+            return ChatResponse(
+                message=reply,
+                session_id=session_id,
+                intent=Intent.COMPLAINT,
+                metadata={"awaiting_issue_summary": True},
+            )
+
+        summary = summary_candidate
+        await self._store_message(session_id, MessageRole.USER, message, Intent.COMPLAINT, None)
+        updates = {
+            "issue_summary": summary,
+            "ticket_context_collected": bool(
+                metadata.get("issue_category")
+                and (not metadata.get("issue_order_related") or metadata.get("active_order_confirmed"))
+            ),
+        }
+        await self._update_session_metadata(session_id, updates)
+        metadata.update(updates)
+        response_text, meta_out = await self._advance_complaint_intake(
+            session_id,
+            metadata,
+            message,
+            source_intent=Intent.COMPLAINT,
+        )
+        await self._store_message(session_id, MessageRole.ASSISTANT, response_text, Intent.COMPLAINT, None)
+        return ChatResponse(message=response_text, session_id=session_id, intent=Intent.COMPLAINT, metadata=meta_out)
+
+    async def _handle_complaint_order_id_collection(
+        self,
+        message: str,
+        session_id: str,
+        metadata: dict,
+    ) -> tuple[str, dict]:
+        normalized_order_id = normalize_order_id(message)
+        if not normalized_order_id:
+            updates = self._complaint_state_updates(
+                state=ConversationState.AWAITING_ORDER,
+                awaiting_order_id=True,
+                complaint_ticket_requested=bool(metadata.get("complaint_ticket_requested")),
+            )
+            updates["order_lookup_failures"] = 0
+            await self._update_session_metadata(session_id, updates)
+            metadata.update(updates)
+            draft = self._build_order_id_prompt(metadata.get("issue_category"))
+            reply = await self._compose_operational_reply(
+                session_id=session_id,
+                user_message=message,
+                draft=draft,
+                facts=self._build_support_context(metadata),
+                required_terms=["order id", "ord-1001"],
+            )
+            return reply, {"awaiting_order_id": True, "issue_category": metadata.get("issue_category")}
+
+        try:
+            await self.order_service.get_by_id(normalized_order_id)
+        except OrderNotFoundError:
+            next_attempt_count = int(metadata.get("order_lookup_failures", 0)) + 1
+            updates = {
+                "active_order_id": None,
+                "active_order_confirmed": False,
+                "active_order_context_idle_turns": 0,
+                "order_lookup_failures": next_attempt_count,
+                **self._complaint_state_updates(
+                    state=ConversationState.AWAITING_ORDER,
+                    awaiting_order_id=True,
+                    complaint_ticket_requested=bool(metadata.get("complaint_ticket_requested")),
+                ),
+            }
+            await self._update_session_metadata(session_id, updates)
+            metadata.update(updates)
+            draft = self._build_order_not_found_reply(normalized_order_id, attempt_count=next_attempt_count)
+            reply = await self._compose_operational_reply(
+                session_id=session_id,
+                user_message=message,
+                draft=draft,
+                facts=self._build_support_context(metadata),
+                required_terms=[normalized_order_id, "not find", "ord-1001"],
+            )
+            return reply, {
+                "order_id": normalized_order_id,
+                "found": False,
+                "awaiting_order_id": True,
+                "active_order_confirmed": False,
+            }
+        except Exception as exc:
+            logger.error("Complaint order lookup failed (%s): %s", normalized_order_id, exc, exc_info=True)
+            return (
+                "I'm sorry, I couldn't verify that order right now. Please try again in a moment.",
+                {"order_id": normalized_order_id, "lookup_error": True},
+            )
+
+        updates = {
+            "active_order_id": normalized_order_id,
+            "active_order_confirmed": True,
+            "active_order_context_idle_turns": 0,
+            "order_lookup_failures": 0,
+            **self._complaint_state_updates(
+                state=ConversationState.NORMAL,
+                complaint_ticket_requested=bool(metadata.get("complaint_ticket_requested")),
+            ),
+        }
+        await self._update_session_metadata(session_id, updates)
+        metadata.update(updates)
+
+        if not metadata.get("issue_summary"):
+            updates = self._complaint_state_updates(
+                state=ConversationState.AWAITING_ISSUE_SUMMARY,
+                awaiting_issue_summary=True,
+                complaint_ticket_requested=bool(metadata.get("complaint_ticket_requested")),
+            )
+            await self._update_session_metadata(session_id, updates)
+            metadata.update(updates)
+            draft = (
+                f"I found order {normalized_order_id}. "
+                f"{self._build_issue_summary_prompt(metadata.get('issue_category'))}"
+            )
+            reply = await self._compose_operational_reply(
+                session_id=session_id,
+                user_message=message,
+                draft=draft,
+                facts=self._build_support_context(metadata),
+                required_terms=[normalized_order_id, "1-2", "issue"],
+            )
+            return reply, {
+                "order_id": normalized_order_id,
+                "found": True,
+                "active_order_confirmed": True,
+                "awaiting_issue_summary": True,
+            }
+
+        return await self._advance_complaint_intake(
+            session_id,
+            metadata,
+            message,
+            source_intent=Intent.COMPLAINT,
+        )
+
+    async def _begin_email_collection_for_ticket(
+        self,
+        *,
+        user_message: str,
+        session_id: str,
+        metadata: dict,
+    ) -> tuple[str, dict]:
+        if metadata.get("customer_email"):
+            return await self._handle_complaint(
+                metadata.get("original_complaint_message", user_message),
+                session_id,
+                metadata,
+            )
+
+        last_email = metadata.get("last_provided_email")
+        if isinstance(last_email, str) and EMAIL_RE.match(last_email):
+            await self._update_session_metadata(
+                session_id,
+                {
+                    "offered_ticket_options": False,
+                    "awaiting_email": True,
+                    "awaiting_email_confirmation": True,
+                    "pending_email": last_email,
+                    "email_attempts": 0,
+                    "state": ConversationState.EMAIL_COLLECTION.value,
+                },
+            )
+            metadata.update(
+                {
+                    "offered_ticket_options": False,
+                    "awaiting_email": True,
+                    "awaiting_email_confirmation": True,
+                    "pending_email": last_email,
+                    "email_attempts": 0,
+                    "state": ConversationState.EMAIL_COLLECTION.value,
+                }
+            )
+            reply = (
+                f'I found this email from earlier in this chat: "{last_email}". '
+                'Is this correct? Reply "yes" to confirm or "change" to provide another email.'
+            )
+            return reply, {
+                "awaiting_email": True,
+                "awaiting_email_confirmation": True,
+                "extracted_email": last_email,
+            }
+
+        await self._update_session_metadata(
+            session_id,
+            {
+                "offered_ticket_options": False,
+                "awaiting_email": True,
+                "awaiting_email_confirmation": False,
+                "pending_email": None,
+                "email_attempts": 0,
+                "state": ConversationState.EMAIL_COLLECTION.value,
+            },
+        )
+        metadata.update(
+            {
+                "offered_ticket_options": False,
+                "awaiting_email": True,
+                "awaiting_email_confirmation": False,
+                "pending_email": None,
+                "email_attempts": 0,
+                "state": ConversationState.EMAIL_COLLECTION.value,
+            }
+        )
+        reply = (
+            "I have the main issue details now. Could you share your email so our team can follow up with you? "
+            "If you'd rather not, just type 'skip'."
+        )
+        return reply, {"awaiting_email": True, "awaiting_email_confirmation": False}
+
     async def _handle_ticket_inquiry(self, session_id: str, user_message: str) -> tuple[str, dict | None]:
         """Handle explicit ticket status/inquiry requests."""
         existing_ticket = await self.ticket_service.get_latest_ticket_for_session(session_id)
         if existing_ticket:
-            draft, meta = self._build_existing_ticket_reply(existing_ticket, {})
+            session_metadata = await self._get_session_metadata(session_id)
+            await self._sync_existing_ticket_metadata(session_id, existing_ticket, session_metadata)
+            draft, meta = self._build_existing_ticket_reply(existing_ticket, session_metadata)
             reply = await self._compose_operational_reply(
                 session_id=session_id,
                 user_message=user_message,
@@ -560,7 +1390,11 @@ class ChatOrchestrator:
         if intent_check in (Intent.FAQ, Intent.ORDER_TRACKING, Intent.GREETING):
             await self._update_session_metadata(
                 session_id,
-                {"offered_ticket_options": False, "state": ConversationState.NORMAL.value},
+                {
+                    "offered_ticket_options": False,
+                    "complaint_ticket_requested": False,
+                    "state": ConversationState.NORMAL.value,
+                },
             )
             await self._store_message(session_id, MessageRole.USER, message, intent_check, None)
             response_text, meta_out = await self._route(intent_check, message, session_id, metadata)
@@ -585,7 +1419,11 @@ class ChatOrchestrator:
         if any(phrase in msg_lower for phrase in option_2_phrases):
             await self._update_session_metadata(
                 session_id,
-                {"offered_ticket_options": False, "state": ConversationState.NORMAL.value},
+                {
+                    "offered_ticket_options": False,
+                    "complaint_ticket_requested": False,
+                    "state": ConversationState.NORMAL.value,
+                },
             )
             await self._store_message(session_id, MessageRole.USER, message, Intent.GENERAL, None)
             history = await self._load_history(session_id)
@@ -596,6 +1434,7 @@ class ChatOrchestrator:
                     "The customer chose to resolve this without creating a ticket. Help them in chat with concrete next steps."
                 ),
                 history=history,
+                support_context=self._build_support_context(metadata),
             )
             await self._store_message(session_id, MessageRole.ASSISTANT, response, Intent.GENERAL, None)
             return ChatResponse(
@@ -626,17 +1465,7 @@ class ChatOrchestrator:
             await self._store_message(session_id, MessageRole.USER, message, Intent.COMPLAINT, None)
             existing_ticket = await self.ticket_service.get_latest_ticket_for_session(session_id)
             if existing_ticket:
-                await self._update_session_metadata(
-                    session_id,
-                    {
-                        "offered_ticket_options": False,
-                        "awaiting_email": False,
-                        "awaiting_email_confirmation": False,
-                        "pending_email": None,
-                        "email_attempts": 0,
-                        "state": ConversationState.NORMAL.value,
-                    },
-                )
+                await self._sync_existing_ticket_metadata(session_id, existing_ticket, metadata)
                 draft_reply, meta_out = self._build_existing_ticket_reply(existing_ticket, metadata)
                 response_text = await self._compose_operational_reply(
                     session_id=session_id,
@@ -653,78 +1482,33 @@ class ChatOrchestrator:
                     metadata=meta_out,
                 )
 
-            if metadata.get("customer_email"):
-                await self._update_session_metadata(
-                    session_id,
-                    {
-                        "offered_ticket_options": False,
-                        "awaiting_email": False,
-                        "awaiting_email_confirmation": False,
-                        "pending_email": None,
-                        "email_attempts": 0,
-                        "state": ConversationState.NORMAL.value,
-                    },
-                )
-                complaint_text = metadata.get("original_complaint_message", message)
-                response_text, meta_out = await self._handle_complaint(complaint_text, session_id, metadata)
-                await self._store_message(session_id, MessageRole.ASSISTANT, response_text, Intent.COMPLAINT, None)
-                return ChatResponse(
-                    message=response_text,
-                    session_id=session_id,
-                    intent=Intent.COMPLAINT,
-                    metadata=meta_out,
-                )
-
-            last_email = metadata.get("last_provided_email")
-            if isinstance(last_email, str) and EMAIL_RE.match(last_email):
-                await self._update_session_metadata(
-                    session_id,
-                    {
-                        "offered_ticket_options": False,
-                        "awaiting_email": True,
-                        "awaiting_email_confirmation": True,
-                        "pending_email": last_email,
-                        "email_attempts": 0,
-                        "state": ConversationState.EMAIL_COLLECTION.value,
-                    },
-                )
-                reply = (
-                    f'I found this email from earlier in this chat: "{last_email}". '
-                    'Is this correct? Reply "yes" to confirm or "change" to provide another email.'
-                )
-                await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.COMPLAINT, None)
-                return ChatResponse(
-                    message=reply,
-                    session_id=session_id,
-                    intent=Intent.COMPLAINT,
-                    metadata={
-                        "awaiting_email": True,
-                        "awaiting_email_confirmation": True,
-                        "extracted_email": last_email,
-                    },
-                )
-
+            metadata["complaint_ticket_requested"] = True
             await self._update_session_metadata(
                 session_id,
                 {
+                    "complaint_ticket_requested": True,
                     "offered_ticket_options": False,
-                    "awaiting_email": True,
-                    "awaiting_email_confirmation": False,
-                    "pending_email": None,
-                    "email_attempts": 0,
-                    "state": ConversationState.EMAIL_COLLECTION.value,
                 },
             )
-            reply = (
-                "Absolutely, I can create a support ticket. Could you share your email so our team can follow up with you? "
-                "If you'd rather not, just type 'skip'."
-            )
-            await self._store_message(session_id, MessageRole.ASSISTANT, reply, Intent.COMPLAINT, None)
+            if not metadata.get("ticket_context_collected"):
+                response_text, meta_out = await self._advance_complaint_intake(
+                    session_id,
+                    metadata,
+                    metadata.get("original_complaint_message", message),
+                    source_intent=Intent.COMPLAINT,
+                )
+            else:
+                response_text, meta_out = await self._begin_email_collection_for_ticket(
+                    user_message=message,
+                    session_id=session_id,
+                    metadata=metadata,
+                )
+            await self._store_message(session_id, MessageRole.ASSISTANT, response_text, Intent.COMPLAINT, None)
             return ChatResponse(
-                message=reply,
+                message=response_text,
                 session_id=session_id,
                 intent=Intent.COMPLAINT,
-                metadata={"awaiting_email": True, "awaiting_email_confirmation": False},
+                metadata=meta_out,
             )
 
         await self._store_message(session_id, MessageRole.USER, message, Intent.COMPLAINT, None)
@@ -751,17 +1535,7 @@ class ChatOrchestrator:
         existing_ticket = await self.ticket_service.get_latest_ticket_for_session(session_id)
         if existing_ticket:
             await self._store_message(session_id, MessageRole.USER, message, Intent.COMPLAINT, None)
-            await self._update_session_metadata(
-                session_id,
-                {
-                    "state": ConversationState.NORMAL.value,
-                    "awaiting_email": False,
-                    "awaiting_email_confirmation": False,
-                    "pending_email": None,
-                    "email_attempts": 0,
-                    "offered_ticket_options": False,
-                },
-            )
+            await self._sync_existing_ticket_metadata(session_id, existing_ticket, metadata)
             draft_reply, meta_out = self._build_existing_ticket_reply(existing_ticket, metadata)
             response_text = await self._compose_operational_reply(
                 session_id=session_id,
@@ -781,17 +1555,12 @@ class ChatOrchestrator:
         intent_check, _, _ = classify_intent(message)
         if "@" not in stripped and self._is_ticket_flow_exit_request(msg_lower):
             await self._store_message(session_id, MessageRole.USER, message, Intent.GENERAL, None)
+            cleared_updates = self._clear_complaint_pending_updates()
             await self._update_session_metadata(
                 session_id,
-                {
-                    "state": ConversationState.NORMAL.value,
-                    "awaiting_email": False,
-                    "awaiting_email_confirmation": False,
-                    "pending_email": None,
-                    "email_attempts": 0,
-                    "offered_ticket_options": False,
-                },
+                cleared_updates,
             )
+            metadata.update(cleared_updates)
             reply = "Understood. I canceled ticket creation for now. Please share your question, and I'll help right away."
             reply = await self._compose_operational_reply(
                 session_id=session_id,
@@ -810,17 +1579,12 @@ class ChatOrchestrator:
 
         if intent_check in (Intent.FAQ, Intent.ORDER_TRACKING, Intent.GREETING) and "@" not in stripped:
             await self._store_message(session_id, MessageRole.USER, message, intent_check, None)
+            cleared_updates = self._clear_complaint_pending_updates()
             await self._update_session_metadata(
                 session_id,
-                {
-                    "state": ConversationState.NORMAL.value,
-                    "awaiting_email": False,
-                    "awaiting_email_confirmation": False,
-                    "pending_email": None,
-                    "email_attempts": 0,
-                    "offered_ticket_options": False,
-                },
+                cleared_updates,
             )
+            metadata.update(cleared_updates)
             response_text, meta_out = await self._route(intent_check, message, session_id, metadata)
             await self._store_message(session_id, MessageRole.ASSISTANT, response_text, intent_check, None)
             route_meta = dict(meta_out or {})
@@ -1107,17 +1871,12 @@ class ChatOrchestrator:
         email_attempts += 1
 
         if email_attempts >= 3:
+            cleared_updates = self._clear_complaint_pending_updates()
             await self._update_session_metadata(
                 session_id,
-                {
-                    "state": ConversationState.NORMAL.value,
-                    "awaiting_email": False,
-                    "awaiting_email_confirmation": False,
-                    "pending_email": None,
-                    "email_attempts": 0,
-                    "offered_ticket_options": False,
-                },
+                cleared_updates,
             )
+            metadata.update(cleared_updates)
             reply = (
                 "I still couldn't validate an email, so I paused ticket creation for now. "
                 "If you want to try again, say 'create ticket' anytime."
@@ -1197,7 +1956,9 @@ class ChatOrchestrator:
     ) -> tuple[str, dict | None]:
         existing_ticket = await self.ticket_service.get_latest_ticket_for_session(session_id)
         if existing_ticket:
-            draft, meta = self._build_existing_ticket_reply(existing_ticket, {})
+            session_metadata = await self._get_session_metadata(session_id)
+            await self._sync_existing_ticket_metadata(session_id, existing_ticket, session_metadata)
+            draft, meta = self._build_existing_ticket_reply(existing_ticket, session_metadata)
             reply = await self._compose_operational_reply(
                 session_id=session_id,
                 user_message=message,
@@ -1207,70 +1968,38 @@ class ChatOrchestrator:
             )
             return reply, meta
 
-        if sentiment_score <= AUTO_ESCALATE_THRESHOLD:
-            await self._update_session_metadata(
-                session_id,
-                {
-                    "offered_ticket_options": False,
-                    "awaiting_email": True,
-                    "email_attempts": 0,
-                    "original_complaint_message": message,
-                    "original_sentiment_score": sentiment_score,
-                    "state": ConversationState.EMAIL_COLLECTION.value,
-                },
-            )
-            meta = {
-                "frustration_detected": True,
-                "frustration_level": frustration.value,
-                "sentiment_score": sentiment_score,
-                "auto_escalate": True,
-            }
-            draft = (
-                "I'm really sorry this happened. I want to escalate it quickly. "
-                "Please share your email so our team can follow up urgently, or type 'skip' if you prefer not to."
-            )
-            reply = await self._compose_operational_reply(
-                session_id=session_id,
-                user_message=message,
-                draft=draft,
-                facts=meta,
-                required_terms=["email", "skip"],
-            )
-            return reply, meta
-
+        ticket_requested = sentiment_score <= AUTO_ESCALATE_THRESHOLD
+        intake_updates = {
+            "original_complaint_message": message,
+            "original_sentiment_score": sentiment_score,
+            "complaint_ticket_requested": ticket_requested,
+        }
         await self._update_session_metadata(
             session_id,
-            {
-                "offered_ticket_options": True,
-                "original_complaint_message": message,
-                "original_sentiment_score": sentiment_score,
-                "state": ConversationState.SUPPORT_OPTIONS.value,
-            },
+            intake_updates,
         )
+        metadata = await self._get_session_metadata(session_id)
         meta = {
             "frustration_detected": True,
             "frustration_level": frustration.value,
             "sentiment_score": sentiment_score,
-            "offered_options": True,
+            "auto_escalate": ticket_requested,
         }
-        draft = (
-            "I'm sorry you're dealing with this. Would you like me to:\n\n"
-            "1. Create a support ticket so our team follows up\n"
-            "2. Try to resolve this here together\n\n"
-            "Please reply with 1 or 2."
+        reply, intake_meta = await self._start_complaint_intake(
+            message,
+            session_id,
+            metadata,
+            ticket_requested=ticket_requested,
+            source_intent=Intent.COMPLAINT,
         )
-        reply = await self._compose_operational_reply(
-            session_id=session_id,
-            user_message=message,
-            draft=draft,
-            facts=meta,
-            required_terms=["1", "2", "ticket"],
-        )
-        return reply, meta
+        combined_meta = dict(intake_meta or {})
+        combined_meta.update(meta)
+        return reply, combined_meta
 
     async def _handle_complaint(self, message: str, session_id: str, metadata: dict) -> tuple[str, dict | None]:
         existing_ticket = await self.ticket_service.get_latest_ticket_for_session(session_id)
         if existing_ticket:
+            await self._sync_existing_ticket_metadata(session_id, existing_ticket, metadata)
             draft, meta = self._build_existing_ticket_reply(existing_ticket, metadata)
             reply = await self._compose_operational_reply(
                 session_id=session_id,
@@ -1282,18 +2011,17 @@ class ChatOrchestrator:
             return reply, meta
 
         customer_email = metadata.get("customer_email")
-        order_id = None
-        order_match = re.search(r"\bORD-[A-Z0-9]+\b", message, re.IGNORECASE)
-        if order_match:
-            order_id = order_match.group(0).upper()
+        order_id = metadata.get("active_order_id") if metadata.get("active_order_confirmed") else None
+        ticket_message = self._build_ticket_description(metadata, fallback_message=message)
+        ticket_category = metadata.get("issue_category") or "complaint"
 
         complaint_req = ComplaintRequest(
-            message=message,
+            message=ticket_message,
             session_id=session_id,
             customer_email=customer_email,
             order_id=order_id,
         )
-        ticket = await self.ticket_service.create_ticket(complaint_req, category="complaint")
+        ticket = await self.ticket_service.create_ticket(complaint_req, category=ticket_category)
 
         await self._update_session_metadata(
             session_id,
@@ -1305,6 +2033,8 @@ class ChatOrchestrator:
                 "awaiting_email_confirmation": False,
                 "pending_email": None,
                 "email_attempts": 0,
+                "ticket_context_collected": True,
+                "complaint_ticket_requested": False,
                 "state": ConversationState.NORMAL.value,
             },
         )
@@ -1340,7 +2070,10 @@ class ChatOrchestrator:
             "priority": ticket.priority.value,
             "status": ticket.status.value,
             "has_email": bool(customer_email),
+            "issue_category": ticket_category,
         }
+        if order_id:
+            meta["order_id"] = order_id
         reply = await self._compose_operational_reply(
             session_id=session_id,
             user_message=message,
@@ -1352,12 +2085,14 @@ class ChatOrchestrator:
     async def _handle_faq(self, message: str, session_id: str) -> tuple[str, dict | None]:
         results = await self.vector_store.search(message, top_k=3)
         history = await self._load_history(session_id)
+        support_context = self._build_support_context(await self._get_session_metadata(session_id))
 
         if not results or results[0].score < 0.55:
             response = await self._llm_generate(
                 user_message=message,
                 extra_context=FAQ_NO_MATCH_PROMPT,
                 history=history,
+                support_context=support_context,
             )
             return response, {"faq_match": False}
 
@@ -1366,22 +2101,17 @@ class ChatOrchestrator:
             user_message=message,
             extra_context=FAQ_GROUNDED_PROMPT.format(context=context),
             history=history,
+            support_context=support_context,
         )
         return response, {"faq_sources": [r.entry.question for r in results], "faq_match": True}
 
     async def _handle_order(self, message: str, session_id: str, metadata: dict) -> tuple[str, dict | None]:
         order_id = None
         message_lower = message.lower()
-
-        order_match = re.search(r"\bORD-[A-Z0-9]+\b", message, re.IGNORECASE)
-        if order_match:
-            order_id = order_match.group(0).upper()
-
         state = self._resolve_state(metadata)
-        if not order_id and (state == ConversationState.AWAITING_ORDER.value or metadata.get("awaiting_order_id")):
-            number_match = re.search(r"\b(\d{4,6})\b", message)
-            if number_match:
-                order_id = f"ORD-{number_match.group(1)}"
+
+        if looks_like_explicit_order_reference(message) or "order" in message_lower:
+            order_id = normalize_order_id(message)
 
         if not order_id and metadata.get("active_order_confirmed"):
             follow_up_words = {
@@ -1400,6 +2130,8 @@ class ChatOrchestrator:
                         "awaiting_order_id": False,
                         "active_order_id": order_id,
                         "active_order_confirmed": True,
+                        "active_order_context_idle_turns": 0,
+                        "order_lookup_failures": 0,
                         "state": ConversationState.NORMAL.value,
                     },
                 )
@@ -1415,6 +2147,7 @@ class ChatOrchestrator:
                             f"Total: ${order.total:.2f}. Explain clearly and offer help."
                         ),
                         history=history,
+                        support_context=self._build_support_context({**metadata, "active_order_id": order_id, "active_order_confirmed": True}),
                     )
                     return response, {"order_id": order_id, "status": "cancelled"}
 
@@ -1427,6 +2160,7 @@ class ChatOrchestrator:
                             f"Estimated delivery: {order.estimated_delivery or 'not yet confirmed'}."
                         ),
                         history=history,
+                        support_context=self._build_support_context({**metadata, "active_order_id": order_id, "active_order_confirmed": True}),
                     )
                     return (
                         response,
@@ -1444,34 +2178,54 @@ class ChatOrchestrator:
                 )
                 return summary, meta
 
-            except Exception as exc:
-                logger.warning("Order lookup failed (%s): %s", order_id, exc)
+            except OrderNotFoundError:
+                next_attempt_count = int(metadata.get("order_lookup_failures", 0)) + 1
                 await self._update_session_metadata(
                     session_id,
                     {
-                        "awaiting_order_id": False,
+                        "awaiting_order_id": True,
                         "active_order_id": None,
                         "active_order_confirmed": False,
-                        "state": ConversationState.NORMAL.value,
+                        "active_order_context_idle_turns": 0,
+                        "order_lookup_failures": next_attempt_count,
+                        "state": ConversationState.AWAITING_ORDER.value,
                     },
                 )
-                draft = (
-                    f"I couldn't find order {order_id} in our system. "
-                    "Please double-check the order ID format (for example, ORD-1001)."
+                metadata.update(
+                    {
+                        "awaiting_order_id": True,
+                        "active_order_id": None,
+                        "active_order_confirmed": False,
+                        "active_order_context_idle_turns": 0,
+                        "order_lookup_failures": next_attempt_count,
+                        "state": ConversationState.AWAITING_ORDER.value,
+                    }
                 )
-                meta = {"order_id": order_id, "found": False}
+                draft = self._build_order_not_found_reply(order_id, attempt_count=next_attempt_count)
+                meta = {"order_id": order_id, "found": False, "awaiting_order_id": True}
                 reply = await self._compose_operational_reply(
                     session_id=session_id,
                     user_message=message,
                     draft=draft,
-                    facts=meta,
+                    facts=self._build_support_context(metadata) | meta,
                     required_terms=[order_id, "ord-1001"],
                 )
                 return (reply, meta)
+            except Exception as exc:
+                logger.error("Order lookup failed (%s): %s", order_id, exc, exc_info=True)
+                return (
+                    "I'm sorry, I couldn't look up that order right now. Please try again in a moment.",
+                    {"order_id": order_id, "lookup_error": True},
+                )
 
         await self._update_session_metadata(
             session_id,
-            {"awaiting_order_id": True, "state": ConversationState.AWAITING_ORDER.value},
+            {
+                "awaiting_order_id": True,
+                "active_order_context_idle_turns": 0,
+                "order_lookup_failures": 0,
+                "state": ConversationState.AWAITING_ORDER.value,
+            },
         )
         draft = "I'd be happy to track your order. Please share your order ID (for example, ORD-1001)."
         reply = await self._compose_operational_reply(
@@ -1499,7 +2253,8 @@ class ChatOrchestrator:
 
     async def _handle_general(self, message: str, session_id: str) -> tuple[str, dict | None]:
         history = await self._load_history(session_id)
-        response = await self._llm_generate(user_message=message, history=history)
+        support_context = self._build_support_context(await self._get_session_metadata(session_id))
+        response = await self._llm_generate(user_message=message, history=history, support_context=support_context)
         return response, None
 
     def _infer_required_terms_from_draft(self, draft: str) -> list[str]:
@@ -1583,16 +2338,20 @@ class ChatOrchestrator:
                     merged_required.append(term.lower())
         merged_required = list(dict.fromkeys(merged_required))
 
+        session_metadata = await self._get_session_metadata(session_id)
+        support_context = self._build_support_context(session_metadata)
         context = OPERATIONS_COMPOSER_PROMPT.format(
             facts_json=json.dumps(facts or {}, ensure_ascii=True, sort_keys=True),
             draft=draft,
         )
+        llm_support_context = None if facts == support_context else support_context
         history = await self._load_history(session_id)
         try:
             candidate = await self._llm_generate(
                 user_message=user_message,
                 extra_context=context,
                 history=history,
+                support_context=llm_support_context,
             )
         except Exception as exc:
             logger.warning("Operational reply composition failed, using draft. error=%s", exc)
@@ -1607,10 +2366,13 @@ class ChatOrchestrator:
         user_message: str,
         extra_context: str = "",
         history: list[Message] | None = None,
+        support_context: dict | None = None,
     ) -> str:
         system = SYSTEM_PROMPT
         if extra_context:
             system = f"{system}\n\n{extra_context}"
+        if support_context:
+            system = f"{system}\n\nSupport context:\n{json.dumps(support_context, ensure_ascii=True, sort_keys=True)}"
 
         messages: list[Message] = []
         if history:

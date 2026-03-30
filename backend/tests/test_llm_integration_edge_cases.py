@@ -47,12 +47,24 @@ class DraftAwareLLMProvider(MockLLMProvider):
 
 async def _create_ticket_in_session(orchestrator: ChatOrchestrator) -> tuple[str, str]:
     start = await orchestrator.handle_message(
-        ChatRequest(message="I am disappointed with your service", channel="test")
+        ChatRequest(message="create a new ticket for me", channel="test")
     )
-    choose = await orchestrator.handle_message(
-        ChatRequest(message="1", session_id=start.session_id, channel="test")
+    assert "what is this about" in start.message.lower()
+
+    category = await orchestrator.handle_message(
+        ChatRequest(message="7", session_id=start.session_id, channel="test")
     )
-    assert "email" in choose.message.lower()
+    assert category.metadata is not None
+    assert category.metadata.get("awaiting_issue_summary") is True
+
+    summary = await orchestrator.handle_message(
+        ChatRequest(
+            message="The support team was dismissive and I still need help.",
+            session_id=start.session_id,
+            channel="test",
+        )
+    )
+    assert "email" in summary.message.lower()
     done = await orchestrator.handle_message(
         ChatRequest(message="anb@gmail.com", session_id=start.session_id, channel="test")
     )
@@ -99,7 +111,7 @@ class TestLLMComposerGuardrails:
             ChatRequest(message="do i have any ticket", session_id=session_id, channel="test")
         )
         assert inquiry.intent == Intent.COMPLAINT
-        assert inquiry.message.startswith("You already have ticket")
+        assert inquiry.message.startswith("We already created support ticket")
         assert f"#{ticket_id[:8]}" in inquiry.message
         assert "anb@gmail.com" in inquiry.message
         assert inquiry.message != "I will take care of everything."
@@ -113,8 +125,8 @@ class TestLLMComposerGuardrails:
         )
         assert first.intent == Intent.COMPLAINT
         assert "1." in first.message
-        assert "2." in first.message
-        assert "reply with 1 or 2" in first.message.lower()
+        assert "7." in first.message
+        assert "reply with the number" in first.message.lower()
 
     async def test_unsafe_rewrite_cannot_remove_extracted_email_confirmation(
         self, mock_vector_store, db_session
@@ -123,10 +135,17 @@ class TestLLMComposerGuardrails:
         orchestrator = ChatOrchestrator(llm=llm, vector_store=mock_vector_store, db=db_session)
 
         start = await orchestrator.handle_message(
-            ChatRequest(message="I am disappointed with your service", channel="test")
+            ChatRequest(message="create a new ticket for me", channel="test")
         )
         await orchestrator.handle_message(
-            ChatRequest(message="1", session_id=start.session_id, channel="test")
+            ChatRequest(message="7", session_id=start.session_id, channel="test")
+        )
+        await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=start.session_id,
+                channel="test",
+            )
         )
         email_turn = await orchestrator.handle_message(
             ChatRequest(
@@ -163,7 +182,7 @@ class TestLLMComposerGuardrails:
         )
 
         inquiry_calls = [
-            c for c in llm.composer_calls if c["draft"].startswith("You already have ticket")
+            c for c in llm.composer_calls if c["draft"].startswith("We already created support ticket")
         ]
         assert inquiry_calls
         messages = inquiry_calls[-1]["messages"]
@@ -171,3 +190,19 @@ class TestLLMComposerGuardrails:
         assert len(contents) >= 2
         assert any("anb@gmail.com" in c for c in contents)
         assert any("do i have any ticket" in c.lower() for c in contents)
+
+    async def test_composer_does_not_repeat_support_context_block(self, mock_vector_store, db_session):
+        llm = DraftAwareLLMProvider(mode="safe")
+        orchestrator = ChatOrchestrator(llm=llm, vector_store=mock_vector_store, db=db_session)
+
+        start = await orchestrator.handle_message(
+            ChatRequest(message="create a new ticket for me", channel="test")
+        )
+        assert start.intent == Intent.COMPLAINT
+
+        composer_calls = [
+            c for c in llm.composer_calls if "what is this about" in c["draft"].lower()
+        ]
+        assert composer_calls
+        system_prompt = composer_calls[-1]["system_prompt"]
+        assert system_prompt.count("Support context:") <= 1

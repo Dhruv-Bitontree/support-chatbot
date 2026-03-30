@@ -9,6 +9,7 @@ import re
 from enum import Enum
 
 from app.models.chat import Intent
+from app.services.orders.order_id_utils import looks_like_explicit_order_reference
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,9 @@ INTENT_PATTERNS: dict[Intent, list[str]] = {
         r"\b(find|check)\s+(my\s+)?(order|package)\b",
         r"\b(ORD-[A-Z0-9]+)\b",
         r"\b(order\s*(number|id|#|no))\b",
+        r"\b((my\s+)?(order|package|shipment)\s+is\s+(still\s+)?not\s+delivered)\b",
+        r"\b(when\s+will\s+i\s+get\s+(my\s+)?refund)\b",
+        r"\b(can\s+you\s+check\s+(on\s+)?(my\s+)?refund)\b",
     ],
     # COMPLAINT patterns now focus on ANGER/FRUSTRATION signals, not just keywords
     Intent.COMPLAINT: [
@@ -44,6 +48,9 @@ INTENT_PATTERNS: dict[Intent, list[str]] = {
         r"\b(not\s+placing\s+(any\s+)?order|won'?t\s+order\s+again)\b",
         r"\b(never\s+getting\s+my\s+order|not\s+on\s+time|late\s+again)\b",
         r"\b(lost\s+(my\s+)?(order|package)|missing\s+(order|package))\b",
+        r"\b(refund\s+(is\s+)?(still\s+)?(missing|pending)|refund\s+has\s+not\s+(come|arrived)|didn'?t\s+get\s+(my\s+)?refund)\b",
+        r"\b(wrong\s+item|incorrect\s+item|damaged\s+item|broken\s+item|item\s+arrived\s+damaged)\b",
+        r"\b(double\s+charged|charged\s+twice|duplicate\s+charge|extra\s+charge)\b",
     ],
     # FAQ patterns include polite transactional questions
     Intent.FAQ: [
@@ -61,7 +68,7 @@ FRUSTRATION_SIGNALS = {
         r"\b(furious|livid|outraged|disgusting|pathetic|ridiculous|unbelievable)\b",
         r"\b(never\s+again|worst\s+ever|absolutely\s+unacceptable)\b",
         r"\b(legal\s+action|lawsuit|lawyer|sue|court\s+case)\b",
-        r"[A-Z]{4,}",  # Multiple words in ALL CAPS
+        r"\b[A-Z]{4,}\b",  # ALL CAPS only when paired with negative context
         r"!{2,}",      # Multiple exclamation marks
     ],
     "moderate": [
@@ -102,6 +109,9 @@ ORDER_LOOKUP_PATTERNS = [
     r"\b(order|delivery|shipping)\s+status\b",
     r"\b(find|check)\s+(my\s+)?(order|package)\b",
     r"\b(order\s*(number|id|#|no))\b",
+    r"\b((my\s+)?(order|package|shipment)\s+is\s+(still\s+)?not\s+delivered)\b",
+    r"\b(when\s+will\s+i\s+get\s+(my\s+)?refund)\b",
+    r"\b(can\s+you\s+check\s+(on\s+)?(my\s+)?refund)\b",
 ]
 
 # ── Polite transactional keywords ────────────────────────────────────────────
@@ -111,6 +121,10 @@ POLITE_INDICATORS = [
     r"\b(please|thank\s+you|thanks|could\s+you|would\s+you|may\s+I)\b",
     r"\b(just\s+wondering|curious|question\s+about)\b",
     r"^\s*(hi|hello|hey)",  # Starts with greeting
+]
+
+ACK_PATTERNS = [
+    r"^\s*(ok|okay|thanks|thank you|got it|cool|fine|alright|understood)\s*[.!]*\s*$",
 ]
 
 
@@ -144,6 +158,12 @@ def detect_frustration(text: str) -> FrustrationLevel:
     
     # Check high frustration first
     for pattern in FRUSTRATION_SIGNALS["high"]:
+        if pattern == r"\b[A-Z]{4,}\b":
+            if not SARCASM_NEGATIVE_CONTEXT.search(text):
+                continue
+            if re.search(pattern, text):
+                return FrustrationLevel.HIGH
+            continue
         if re.search(pattern, text, re.IGNORECASE if pattern.startswith(r"\b") else 0):
             return FrustrationLevel.HIGH
     
@@ -172,14 +192,44 @@ def is_polite_tone(text: str) -> bool:
 def is_order_lookup_request(text: str) -> bool:
     """Return True when a message explicitly asks to track/find an order."""
     text_lower = text.lower().strip()
-    if re.search(r"\bORD-[A-Z0-9]+\b", text, re.IGNORECASE):
-        return True
-    if re.fullmatch(r"\d{4,6}", text_lower):
+    if looks_like_explicit_order_reference(text):
         return True
     for pattern in ORDER_LOOKUP_PATTERNS:
         if re.search(pattern, text_lower, re.IGNORECASE):
             return True
     return False
+
+
+def is_acknowledgement(text: str) -> bool:
+    """Return True for brief acknowledgements that should stay general."""
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in ACK_PATTERNS)
+
+
+def _intent_confidence(scores: dict[Intent, int]) -> float:
+    total = sum(scores.values())
+    if total <= 0:
+        return 0.0
+    return max(scores.values()) / total
+
+
+def _log_intent_decision(
+    text: str,
+    intent: Intent,
+    scores: dict[Intent, int],
+    frustration: FrustrationLevel,
+    sarcasm: bool,
+) -> None:
+    logger.debug(
+        "Intent decision",
+        extra={
+            "text": text,
+            "intent": intent.value,
+            "scores": {key.value: value for key, value in scores.items()},
+            "confidence": _intent_confidence(scores),
+            "frustration": frustration.value,
+            "sarcasm": sarcasm,
+        },
+    )
 
 
 def classify_intent_keyword(text: str) -> tuple[Intent, FrustrationLevel, bool]:
@@ -205,6 +255,10 @@ def classify_intent_keyword(text: str) -> tuple[Intent, FrustrationLevel, bool]:
     sarcasm = detect_sarcasm(text)
     frustration = detect_frustration(text)
     is_polite = is_polite_tone(text)
+    if is_acknowledgement(text) and frustration == FrustrationLevel.NONE and not sarcasm:
+        scores = {intent: 0 for intent in Intent}
+        _log_intent_decision(text, Intent.GENERAL, scores, frustration, sarcasm)
+        return Intent.GENERAL, frustration, sarcasm
 
     # Score each intent
     scores: dict[Intent, int] = {intent: 0 for intent in Intent}
@@ -215,30 +269,43 @@ def classify_intent_keyword(text: str) -> tuple[Intent, FrustrationLevel, bool]:
 
     # PRIORITY RULE 1: High frustration OR sarcasm → always COMPLAINT
     if frustration in (FrustrationLevel.HIGH, FrustrationLevel.MODERATE) or sarcasm:
+        _log_intent_decision(text, Intent.COMPLAINT, scores, frustration, sarcasm)
         return Intent.COMPLAINT, frustration, sarcasm
     
     # PRIORITY RULE 2: Polite tone + transactional keywords → FAQ not COMPLAINT
     # Example: "Hi, I returned my item, when will I get my refund?"
     if is_polite and scores[Intent.FAQ] > 0 and scores[Intent.COMPLAINT] > 0:
+        _log_intent_decision(text, Intent.FAQ, scores, frustration, sarcasm)
         return Intent.FAQ, frustration, sarcasm
+
+    # PRIORITY RULE 3: Neutral refund/order-status phrasing stays operational, not complaint.
+    if scores[Intent.COMPLAINT] > 0 and frustration == FrustrationLevel.NONE and not sarcasm:
+        if is_order_lookup_request(text) or "refund" in text_lower:
+            _log_intent_decision(text, Intent.ORDER_TRACKING, scores, frustration, sarcasm)
+            return Intent.ORDER_TRACKING, frustration, sarcasm
     
-    # PRIORITY RULE 3: COMPLAINT keywords present → COMPLAINT wins over other intents
+    # PRIORITY RULE 4: COMPLAINT keywords present → COMPLAINT wins over other intents
     if scores[Intent.COMPLAINT] > 0:
+        _log_intent_decision(text, Intent.COMPLAINT, scores, frustration, sarcasm)
         return Intent.COMPLAINT, frustration, sarcasm
     
-    # PRIORITY RULE 4: ORDER_TRACKING only when request is explicit/actionable
+    # PRIORITY RULE 5: ORDER_TRACKING only when request is explicit/actionable
     if scores[Intent.ORDER_TRACKING] > 0 and is_order_lookup_request(text):
+        _log_intent_decision(text, Intent.ORDER_TRACKING, scores, frustration, sarcasm)
         return Intent.ORDER_TRACKING, frustration, sarcasm
     
-    # PRIORITY RULE 5: FAQ beats GREETING and GENERAL
+    # PRIORITY RULE 6: FAQ beats GREETING and GENERAL
     if scores[Intent.FAQ] > 0:
+        _log_intent_decision(text, Intent.FAQ, scores, frustration, sarcasm)
         return Intent.FAQ, frustration, sarcasm
     
-    # PRIORITY RULE 6: GREETING
+    # PRIORITY RULE 7: GREETING
     if scores[Intent.GREETING] > 0:
+        _log_intent_decision(text, Intent.GREETING, scores, frustration, sarcasm)
         return Intent.GREETING, frustration, sarcasm
     
     # Fallback to GENERAL
+    _log_intent_decision(text, Intent.GENERAL, scores, frustration, sarcasm)
     return Intent.GENERAL, frustration, sarcasm
 
 
@@ -260,6 +327,8 @@ async def classify_intent_llm(text: str, llm) -> tuple[Intent, FrustrationLevel,
     try:
         categories = [i.value for i in Intent]
         result = await llm.classify(text, categories)
+        if result not in categories:
+            raise ValueError(f"invalid intent: {result}")
         intent = Intent(result)
         # Still run frustration/sarcasm detection even with LLM classification
         frustration = detect_frustration(text)

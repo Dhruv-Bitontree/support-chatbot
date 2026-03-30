@@ -33,37 +33,42 @@ class TestStateMachineBugs:
         
         # Step 1: Trigger auto-escalation (sentiment <= -0.5)
         request1 = ChatRequest(
-            message="This is absolutely terrible! I'm furious and want a refund NOW!",
+            message="This is absolutely terrible! I'm furious!",
             channel="test"
         )
         response1 = await orchestrator.handle_message(request1)
         session_id = response1.session_id
-        
-        # Should offer frustration options (not immediate ticket due to email-first rule)
-        assert "would you like" in response1.message.lower() or "option" in response1.message.lower()
-        
-        # Step 2: Choose to create ticket
-        request2 = ChatRequest(
-            message="1",
-            session_id=session_id,
-            channel="test"
+
+        assert "what is this about" in response1.message.lower()
+
+        category = await orchestrator.handle_message(
+            ChatRequest(message="7", session_id=session_id, channel="test")
         )
-        response2 = await orchestrator.handle_message(request2)
-        
-        # Should ask for email
-        assert "email" in response2.message.lower()
-        
-        # Step 3: Provide valid email
-        request3 = ChatRequest(
+        assert category.metadata is not None
+        assert category.metadata.get("awaiting_issue_summary") is True
+
+        summary = await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=session_id,
+                channel="test",
+            )
+        )
+        assert "1 or 2" in summary.message.lower()
+
+        choose_ticket = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=session_id, channel="test")
+        )
+        assert "email" in choose_ticket.message.lower()
+
+        request2 = ChatRequest(
             message="user@example.com",
             session_id=session_id,
             channel="test"
         )
-        response3 = await orchestrator.handle_message(request3)
-        
-        # Verify ticket was created
-        assert response3.metadata is not None
-        assert "ticket_id" in response3.metadata
+        response2 = await orchestrator.handle_message(request2)
+        assert response2.metadata is not None
+        assert "ticket_id" in response2.metadata
         
         # Step 4: Send another message to the same session
         request4 = ChatRequest(
@@ -74,7 +79,7 @@ class TestStateMachineBugs:
         response4 = await orchestrator.handle_message(request4)
         
         # EXPECTED BEHAVIOR (new UX): acknowledge existing ticket without locking session
-        assert "open ticket" in response4.message.lower() or "already have" in response4.message.lower()
+        assert "support ticket" in response4.message.lower() or "same ticket" in response4.message.lower()
         assert response4.intent == Intent.COMPLAINT
 
     async def test_bug_1_2_infinite_email_collection_loop(
@@ -99,19 +104,24 @@ class TestStateMachineBugs:
         )
         response1 = await orchestrator.handle_message(request1)
         session_id = response1.session_id
-        
-        # Should offer options (not auto-escalate)
-        assert "would you like" in response1.message.lower() or "option" in response1.message.lower()
-        
-        # Step 2: Choose to create ticket (option 1)
-        request2 = ChatRequest(
-            message="1",
-            session_id=session_id,
-            channel="test"
+
+        assert "what is this about" in response1.message.lower()
+
+        await orchestrator.handle_message(
+            ChatRequest(message="7", session_id=session_id, channel="test")
         )
-        response2 = await orchestrator.handle_message(request2)
-        
-        # Should ask for email
+        details = await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=session_id,
+                channel="test",
+            )
+        )
+        assert "1 or 2" in details.message.lower()
+
+        response2 = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=session_id, channel="test")
+        )
         assert "email" in response2.message.lower()
         
         # Step 3: Provide invalid email (attempt 1)
@@ -249,30 +259,29 @@ class TestStateMachineBugs:
         )
         response1 = await orchestrator.handle_message(request1)
         session_id = response1.session_id
-        
-        # Should offer frustration options (not immediate ticket due to email-first rule)
-        assert "would you like" in response1.message.lower() or "option" in response1.message.lower()
-        
-        # Step 2: Choose to create ticket
-        request2 = ChatRequest(
-            message="1",
-            session_id=session_id,
-            channel="test"
+
+        assert "what is this about" in response1.message.lower()
+
+        await orchestrator.handle_message(
+            ChatRequest(message="7", session_id=session_id, channel="test")
         )
-        response2 = await orchestrator.handle_message(request2)
-        
-        # Should ask for email
-        assert "email" in response2.message.lower()
-        
-        # Step 3: Provide valid email
-        request3 = ChatRequest(
-            message="user@example.com",
-            session_id=session_id,
-            channel="test"
+        summary = await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=session_id,
+                channel="test",
+            )
         )
-        response3 = await orchestrator.handle_message(request3)
-        
-        # Verify ticket was created
+        assert "1 or 2" in summary.message.lower()
+
+        choose_ticket = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=session_id, channel="test")
+        )
+        assert "email" in choose_ticket.message.lower()
+
+        response3 = await orchestrator.handle_message(
+            ChatRequest(message="user@example.com", session_id=session_id, channel="test")
+        )
         assert response3.metadata is not None
         assert "ticket_id" in response3.metadata
         
@@ -315,28 +324,29 @@ class TestStateMachineBugs:
         )
         response1 = await orchestrator.handle_message(request1)
         session_id = response1.session_id
-        
-        # Should offer frustration options
-        assert "would you like" in response1.message.lower() or "option" in response1.message.lower()
-        
-        # Step 2: Choose to create ticket
-        request2 = ChatRequest(
-            message="1",
-            session_id=session_id,
-            channel="test"
+
+        assert "what is this about" in response1.message.lower()
+
+        await orchestrator.handle_message(
+            ChatRequest(message="7", session_id=session_id, channel="test")
         )
-        response2 = await orchestrator.handle_message(request2)
-        
-        # Should ask for email
-        assert "email" in response2.message.lower()
-        
-        # Step 3: Provide valid email to create first ticket
-        request3 = ChatRequest(
-            message="user@example.com",
-            session_id=session_id,
-            channel="test"
+        summary = await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=session_id,
+                channel="test",
+            )
         )
-        response3 = await orchestrator.handle_message(request3)
+        assert "1 or 2" in summary.message.lower()
+
+        choose_ticket = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=session_id, channel="test")
+        )
+        assert "email" in choose_ticket.message.lower()
+
+        response3 = await orchestrator.handle_message(
+            ChatRequest(message="user@example.com", session_id=session_id, channel="test")
+        )
         first_ticket_id = response3.metadata.get("ticket_id")
         
         assert first_ticket_id is not None
@@ -350,7 +360,7 @@ class TestStateMachineBugs:
         response4 = await orchestrator.handle_message(request4)
         
         # EXPECTED BEHAVIOR: Should acknowledge existing ticket, not create new one
-        assert "open ticket" in response4.message.lower() or "already have" in response4.message.lower()
+        assert "support ticket" in response4.message.lower() or "same ticket" in response4.message.lower()
         
         # Should NOT have a new ticket_id in metadata (or same ticket_id)
         if response4.metadata and "ticket_id" in response4.metadata:

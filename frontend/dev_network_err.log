@@ -1,0 +1,78 @@
+ ⨯ [Error [InvariantError]: Invariant: Expected clientReferenceManifest to be defined. This is a bug in Next.js.]
+ ⨯ [Error [InvariantError]: Invariant: Expected clientReferenceManifest to be defined. This is a bug in Next.js.] {
+  page: '/'
+}
+[Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\client-development\4.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\client-development\\4.pack.gz'
+}
+ ⨯ unhandledRejection: [Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\client-development\4.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\client-development\\4.pack.gz'
+}
+ ⨯ unhandledRejection:  [Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\client-development\4.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\client-development\\4.pack.gz'
+}
+[Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\client-development\8.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\client-development\\8.pack.gz'
+}
+ ⨯ unhandledRejection: [Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\client-development\8.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\client-development\\8.pack.gz'
+}
+ ⨯ unhandledRejection:  [Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\client-development\8.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\client-development\\8.pack.gz'
+}
+<w> [webpack.cache.PackFileCacheStrategy] Caching failed for pack: Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\client-development\4.pack.gz'
+[Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\server-development\3.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\server-development\\3.pack.gz'
+}
+ ⨯ unhandledRejection: [Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\server-development\3.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\server-development\\3.pack.gz'
+}
+ ⨯ unhandledRejection:  [Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\server-development\3.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\server-development\\3.pack.gz'
+}
+[Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\server-development\6.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\server-development\\6.pack.gz'
+}
+ ⨯ unhandledRejection: [Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\server-development\6.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\server-development\\6.pack.gz'
+}
+ ⨯ unhandledRejection:  [Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\server-development\6.pack.gz'] {
+  errno: -4058,
+  code: 'ENOENT',
+  syscall: 'stat',
+  path: 'C:\\Users\\BAPS\\Desktop\\support-chatbot\\frontend\\.next-dev\\cache\\webpack\\server-development\\6.pack.gz'
+}
+<w> [webpack.cache.PackFileCacheStrategy] Caching failed for pack: Error: ENOENT: no such file or directory, stat 'C:\Users\BAPS\Desktop\support-chatbot\frontend\.next-dev\cache\webpack\server-development\3.pack.gz'

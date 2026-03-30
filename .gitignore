@@ -39,3 +39,5 @@ Thumbs.db
 frontend/dev_3001*.log
 frontend/dev_3002*.log
 frontend/dev_fix*.log
+temp_auto_push.bat
+temp_interactive_push.bat

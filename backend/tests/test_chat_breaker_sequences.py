@@ -29,12 +29,19 @@ class TestChatBreakerSequences:
         )
 
         first = await orchestrator.handle_message(
-            ChatRequest(message="I have a complaint", channel="test")
+            ChatRequest(message="create a new ticket for me", channel="test")
         )
         second = await orchestrator.handle_message(
-            ChatRequest(message="1", session_id=first.session_id, channel="test")
+            ChatRequest(message="7", session_id=first.session_id, channel="test")
         )
-        assert "email" in second.message.lower()
+        third = await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=first.session_id,
+                channel="test",
+            )
+        )
+        assert "email" in third.message.lower()
 
         refusal = await orchestrator.handle_message(
             ChatRequest(
@@ -58,10 +65,17 @@ class TestChatBreakerSequences:
         )
 
         first = await orchestrator.handle_message(
-            ChatRequest(message="I am disappointed with your service", channel="test")
+            ChatRequest(message="create a new ticket for me", channel="test")
         )
         await orchestrator.handle_message(
-            ChatRequest(message="1", session_id=first.session_id, channel="test")
+            ChatRequest(message="7", session_id=first.session_id, channel="test")
+        )
+        await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=first.session_id,
+                channel="test",
+            )
         )
         confirm = await orchestrator.handle_message(
             ChatRequest(
@@ -142,23 +156,18 @@ class TestChatBreakerSequences:
             )
         )
         assert b.intent == Intent.COMPLAINT
-        assert "order id" not in b.message.lower()
+        assert "what is this about" in b.message.lower()
 
         c = await orchestrator.handle_message(
-            ChatRequest(message="2", session_id=a.session_id, channel="test")
-        )
-        assert c.intent == Intent.GENERAL
-
-        d = await orchestrator.handle_message(
             ChatRequest(
                 message="Can I change my shipping address after ordering?",
                 session_id=a.session_id,
                 channel="test",
             )
         )
-        assert d.intent == Intent.FAQ
-        assert "share your email so i can submit the ticket" not in d.message.lower()
-        assert "order id" not in d.message.lower()
+        assert c.intent == Intent.FAQ
+        assert "share your email so i can submit the ticket" not in c.message.lower()
+        assert "order id" not in c.message.lower()
 
     async def test_breaker_ticket_inquiry_yes_enters_ticket_option_flow(
         self, mock_llm, mock_vector_store, db_session
@@ -177,8 +186,7 @@ class TestChatBreakerSequences:
             ChatRequest(message="yes", session_id=inquiry.session_id, channel="test")
         )
         assert yes.intent == Intent.COMPLAINT
-        assert "share your email" in yes.message.lower()
-        assert "type 'skip'" in yes.message.lower()
+        assert "what is this about" in yes.message.lower()
         assert "current email address" not in yes.message.lower()
         assert "new email address" not in yes.message.lower()
         assert "ticket id" not in yes.message.lower()
@@ -217,10 +225,21 @@ class TestChatBreakerSequences:
             ChatRequest(message="create a new ticket for me", channel="test")
         )
         assert create.intent == Intent.COMPLAINT
-        assert "share your email" in create.message.lower()
-        assert "type 'skip'" in create.message.lower()
+        assert "what is this about" in create.message.lower()
         assert create.metadata is not None
-        assert create.metadata.get("awaiting_email") is True
+        assert create.metadata.get("awaiting_issue_category") is True
+
+        await orchestrator.handle_message(
+            ChatRequest(message="7", session_id=create.session_id, channel="test")
+        )
+        summary = await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=create.session_id,
+                channel="test",
+            )
+        )
+        assert "email" in summary.message.lower()
 
         finish = await orchestrator.handle_message(
             ChatRequest(message="skip", session_id=create.session_id, channel="test")
@@ -248,11 +267,23 @@ class TestChatBreakerSequences:
             )
         )
         assert second.intent == Intent.COMPLAINT
-        assert '"ansh@test.com"' in second.message
-        assert "yes" in second.message.lower()
-        assert "change" in second.message.lower()
-        assert second.metadata is not None
-        assert second.metadata.get("awaiting_email_confirmation") is True
+        assert "what is this about" in second.message.lower()
+
+        await orchestrator.handle_message(
+            ChatRequest(message="7", session_id=first.session_id, channel="test")
+        )
+        summary = await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=first.session_id,
+                channel="test",
+            )
+        )
+        assert '"ansh@test.com"' in summary.message
+        assert "yes" in summary.message.lower()
+        assert "change" in summary.message.lower()
+        assert summary.metadata is not None
+        assert summary.metadata.get("awaiting_email_confirmation") is True
 
         confirm = await orchestrator.handle_message(
             ChatRequest(message="yes", session_id=first.session_id, channel="test")

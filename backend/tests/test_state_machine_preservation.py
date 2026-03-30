@@ -103,44 +103,50 @@ class TestPreservation:
         
         # Step 1: Send a message with very negative sentiment (should trigger auto-escalation)
         request1 = ChatRequest(
-            message="This is absolutely terrible! I'm furious and want a refund NOW!",
+            message="This is absolutely terrible! I'm furious and need urgent help NOW!",
             channel="test"
         )
         response1 = await orchestrator.handle_message(request1)
         session_id = response1.session_id
-        
-        # Should offer frustration options (not immediate ticket due to email-first rule)
-        assert "would you like" in response1.message.lower() or "option" in response1.message.lower()
-        
-        # Step 2: Choose to create ticket
-        request2 = ChatRequest(
-            message="1",
-            session_id=session_id,
-            channel="test"
+
+        assert "what is this about" in response1.message.lower()
+
+        response2 = await orchestrator.handle_message(
+            ChatRequest(message="7", session_id=session_id, channel="test")
         )
-        response2 = await orchestrator.handle_message(request2)
-        
-        # Should ask for email
-        assert "email" in response2.message.lower()
-        
-        # Step 3: Provide valid email
-        request3 = ChatRequest(
-            message="user@example.com",
-            session_id=session_id,
-            channel="test"
+        assert response2.metadata is not None
+        assert response2.metadata.get("awaiting_issue_summary") is True
+
+        response3 = await orchestrator.handle_message(
+            ChatRequest(
+                message="The refund is still missing after my cancellation.",
+                session_id=session_id,
+                channel="test",
+            )
         )
-        response3 = await orchestrator.handle_message(request3)
+        assert response3.metadata is not None
+        assert response3.metadata.get("offered_ticket_options") is True
+
+        choose_ticket = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=session_id, channel="test")
+        )
+        assert choose_ticket.metadata is not None
+        assert choose_ticket.metadata.get("awaiting_email") is True
+
+        response4 = await orchestrator.handle_message(
+            ChatRequest(message="user@example.com", session_id=session_id, channel="test")
+        )
         
         # Should create URGENT ticket
-        assert response3.intent == Intent.COMPLAINT
-        assert response3.metadata is not None
-        assert "ticket_id" in response3.metadata
+        assert response4.intent == Intent.COMPLAINT
+        assert response4.metadata is not None
+        assert "ticket_id" in response4.metadata
         
         # Verify ticket was created with URGENT priority
         from sqlalchemy import select
         from app.db.models import Ticket
         
-        ticket_id = response3.metadata["ticket_id"]
+        ticket_id = response4.metadata["ticket_id"]
         result = await db_session.execute(
             select(Ticket).where(Ticket.id == ticket_id)
         )
@@ -281,28 +287,29 @@ class TestPreservation:
         )
         response1 = await orchestrator.handle_message(request1)
         session_id = response1.session_id
-        
-        # Should offer frustration options
-        assert "would you like" in response1.message.lower() or "option" in response1.message.lower()
-        
-        # Step 2: Choose to create ticket
-        request2 = ChatRequest(
-            message="1",
-            session_id=session_id,
-            channel="test"
+
+        assert "what is this about" in response1.message.lower()
+
+        await orchestrator.handle_message(
+            ChatRequest(message="7", session_id=session_id, channel="test")
         )
-        response2 = await orchestrator.handle_message(request2)
-        
-        # Should ask for email
-        assert "email" in response2.message.lower()
-        
-        # Step 3: Provide valid email to create first ticket
-        request3 = ChatRequest(
-            message="user@example.com",
-            session_id=session_id,
-            channel="test"
+        summary = await orchestrator.handle_message(
+            ChatRequest(
+                message="The support team was dismissive and I still need help.",
+                session_id=session_id,
+                channel="test",
+            )
         )
-        response3 = await orchestrator.handle_message(request3)
+        assert "1 or 2" in summary.message.lower()
+
+        choose_ticket = await orchestrator.handle_message(
+            ChatRequest(message="1", session_id=session_id, channel="test")
+        )
+        assert "email" in choose_ticket.message.lower()
+
+        response3 = await orchestrator.handle_message(
+            ChatRequest(message="user@example.com", session_id=session_id, channel="test")
+        )
         first_ticket_id = response3.metadata.get("ticket_id")
         
         assert first_ticket_id is not None
@@ -317,9 +324,9 @@ class TestPreservation:
         
         # After state machine fix: Should return closure message due to session lock
         # Before fix: Would return "already have" message
-        assert ("already have" in response4.message.lower() or 
-                "existing" in response4.message.lower() or
-                "ticket has been created" in response4.message.lower())
+        assert ("support ticket" in response4.message.lower() or
+                "same ticket" in response4.message.lower() or
+                "existing" in response4.message.lower())
         assert "ticket" in response4.message.lower()
         
         # Should reference the existing ticket or indicate session is closed
